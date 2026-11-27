@@ -21,6 +21,8 @@ _FILES = {
     "/three.module.js": ("node_modules/three/build/three.module.js", "text/javascript; charset=utf-8"),
     "/three.core.js": ("node_modules/three/build/three.core.js", "text/javascript; charset=utf-8"),
 }
+DEFAULT_CHARACTER = "female"
+CHARACTER_VOICES = {"female": "marina", "male": "filipp"}
 _FRAMES_PER_SECOND = 30
 _EMOTIONS = {
     "concern": r"\b(?:проблема|проблемы|риск|риски|сорвали|задержка|сбой|отменили|не успеем)\b",
@@ -41,7 +43,8 @@ def reaction(text: str) -> str:
 
 
 class AvatarState:
-    def __init__(self):
+    def __init__(self, character: str = DEFAULT_CHARACTER):
+        self._character = character
         self._lock = Lock()
         self._pose = ("idle", "neutral", (), monotonic())
 
@@ -62,7 +65,12 @@ class AvatarState:
         with self._lock:
             phase, emotion, levels, started = self._pose
         start_frame = int((monotonic() - started) * (SAMPLE_RATE / (SAMPLE_RATE // _FRAMES_PER_SECOND)))
-        return {"phase": phase, "emotion": emotion, "levels": levels[start_frame:start_frame + 12]}
+        return {
+            "character": self._character,
+            "phase": phase,
+            "emotion": emotion,
+            "levels": levels[start_frame:start_frame + 12],
+        }
 
 
 @contextmanager

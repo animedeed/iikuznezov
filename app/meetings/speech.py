@@ -16,8 +16,9 @@ class SpeechError(RuntimeError):
 
 
 class YandexSpeech:
-    def __init__(self, client: httpx.Client, api_key: str):
+    def __init__(self, client: httpx.Client, api_key: str, *, voice: str = "marina"):
         self._client = client
+        self._voice = voice
         self._headers = {"Authorization": f"Api-Key {api_key}"}
 
     def recognize(self, pcm: bytes) -> str:
@@ -35,7 +36,7 @@ class YandexSpeech:
         return result.strip()
 
     def synthesize(self, text: str) -> bytes:
-        response = self._post("tts", _TTS, data={**_FORMAT, "text": text, "voice": "marina"})
+        response = self._post("tts", _TTS, data={**_FORMAT, "text": text, "voice": self._voice})
         pcm = response.content
         if not pcm or len(pcm) % SAMPLE_BYTES:
             raise SpeechError("tts_invalid_pcm")

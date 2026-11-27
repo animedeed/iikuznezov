@@ -26,7 +26,8 @@ def test_recognition_sends_russian_pcm_and_returns_clean_text():
         assert YandexSpeech(client, "test-speech-key").recognize(pcm) == "Привет, коллеги."
 
 
-def test_synthesis_posts_russian_voice_and_returns_raw_pcm():
+@pytest.mark.parametrize(("voice_args", "voice"), [({}, "marina"), ({"voice": "filipp"}, "filipp")])
+def test_synthesis_posts_russian_voice_and_returns_raw_pcm(voice_args, voice):
     pcm = b"\x01\x00\x02\x00"
     reply = "Что будем делать в четверг?"
 
@@ -39,14 +40,14 @@ def test_synthesis_posts_russian_voice_and_returns_raw_pcm():
         assert request.headers["Content-Type"].startswith("application/x-www-form-urlencoded")
         fields = parse_qs(request.content.decode("ascii"))
         assert fields["text"] == [reply]
-        assert fields["voice"] == ["marina"]
+        assert fields["voice"] == [voice]
         assert fields["format"] == ["lpcm"]
         assert fields["sampleRateHertz"] == [str(SAMPLE_RATE)]
         assert "folderId" not in fields
         return httpx.Response(200, content=pcm)
 
     with httpx.Client(transport=httpx.MockTransport(synthesize)) as client:
-        assert YandexSpeech(client, "test-speech-key").synthesize(reply) == pcm
+        assert YandexSpeech(client, "test-speech-key", **voice_args).synthesize(reply) == pcm
 
 
 def test_recognition_returns_empty_text_when_provider_detects_no_speech():

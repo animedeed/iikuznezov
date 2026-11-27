@@ -1,6 +1,8 @@
 import * as THREE from "/three.module.js";
 
-const demo = new URLSearchParams(location.search).has("demo");
+const params = new URLSearchParams(location.search);
+const demo = params.has("demo");
+const showControls = demo && !params.has("camera");
 const status = document.querySelector("#status");
 const controls = document.querySelector("#controls");
 const names = {
@@ -19,35 +21,60 @@ const expressions = {
   surprise: { hue: 0xffd788, eyes: 1.38, brow: 0, lift: .18, smile: -.07, tilt: .03 },
   concern: { hue: 0xffb489, eyes: .72, brow: -.37, lift: .06, smile: -.14, tilt: .12 },
 };
-let state = { phase: "idle", emotion: "neutral", levels: [] };
+const characters = {
+  female: {
+    shell: 0xe3a956, frame: 0xffe1a1, trim: 0x3b564e, light: 0x94f0cc,
+    head: [2.28, 1.54, .96, .46], face: [2.00, 1.27, .20, .38], glass: [1.84, 1.10, .15, .34],
+    torso: [1.52, 1.24, .64, .33], chest: [1.36, .99, .26, .29],
+    eyeWidth: .105, eyeHeight: .18, shoulder: .78, crown: .62, base: 0x31443f, halo: 0x8cbcac,
+  },
+  male: {
+    shell: 0x446eae, frame: 0xb1cee9, trim: 0x253a51, light: 0x9edfff,
+    head: [2.29, 1.47, 1.02, .23], face: [2.03, 1.23, .20, .24], glass: [1.87, 1.07, .15, .20],
+    torso: [1.78, 1.24, .72, .23], chest: [1.61, 1.02, .26, .19],
+    eyeWidth: .134, eyeHeight: .15, shoulder: .89, crown: -.59, base: 0x2a3b50, halo: 0x90b7df,
+  },
+};
+const previewCharacter = params.get("character");
+const initialCharacter = demo && Object.hasOwn(characters, previewCharacter) ? previewCharacter : "female";
+let state = { character: initialCharacter, phase: "idle", emotion: "neutral", levels: [] };
 let receivedAt = 0;
 let changedAt = 0;
 let lastPoll = -Infinity;
 
 function update(next) {
-  if (!poses[next.phase] || !expressions[next.emotion]) return;
-  if (state.phase !== next.phase || state.emotion !== next.emotion) changedAt = performance.now();
+  if (!Object.hasOwn(characters, next.character) || !Object.hasOwn(poses, next.phase)
+      || !Object.hasOwn(expressions, next.emotion)) return;
+  if (state.phase !== next.phase || state.emotion !== next.emotion || state.character !== next.character) {
+    changedAt = performance.now();
+  }
+  document.documentElement.dataset.character = next.character;
   state = next;
   receivedAt = performance.now();
-  if (demo) {
+  if (showControls) {
     status.textContent = [names[state.phase], names[state.emotion]].filter(Boolean).join(" · ");
-    for (const button of controls.querySelectorAll("button")) {
+    for (const button of controls.querySelectorAll("[data-phase]")) {
       button.setAttribute("aria-pressed", String(
         button.dataset.phase === state.phase && button.dataset.emotion === state.emotion,
       ));
     }
+    for (const button of controls.querySelectorAll("[data-character]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.character === state.character));
+    }
+    controls.querySelector("a").href = `/?demo=1&camera=1&character=${state.character}`;
   }
 }
 
-if (demo) {
+if (showControls) {
   document.body.classList.add("preview");
   controls.hidden = false;
   controls.addEventListener("click", (event) => {
     const button = event.target.closest("button");
-    if (button) update({ phase: button.dataset.phase, emotion: button.dataset.emotion, levels: [] });
+    if (button?.dataset.character) update({ ...state, character: button.dataset.character });
+    if (button?.dataset.phase) update({ ...state, phase: button.dataset.phase, emotion: button.dataset.emotion });
   });
-  update(state);
 }
+update(state);
 
 async function poll() {
   try {
@@ -57,7 +84,7 @@ async function poll() {
       lastPoll = performance.now();
     }
   } catch {
-    if (performance.now() - lastPoll > 1000) update({ phase: "idle", emotion: "neutral", levels: [] });
+    if (performance.now() - lastPoll > 1000) update({ ...state, phase: "idle", emotion: "neutral", levels: [] });
   } finally {
     setTimeout(poll, 90);
   }
@@ -95,43 +122,53 @@ function ball(parent, material, x, y, z, sx, sy, sz) {
   return mesh;
 }
 
-function makeAvatar(scene) {
+function makeAvatar(scene, character) {
+  const design = characters[character];
+  const female = character === "female";
   const body = new THREE.Group();
   scene.add(body);
   const head = new THREE.Group();
   head.position.y = .68;
   body.add(head);
   const enamel = new THREE.MeshPhysicalMaterial({
-    color: 0xe3a956, metalness: .3, roughness: .29, clearcoat: .62, clearcoatRoughness: .18,
+    color: design.shell, metalness: .3, roughness: .29, clearcoat: .62, clearcoatRoughness: .18,
   });
-  const cream = new THREE.MeshStandardMaterial({ color: 0xffe1a1, roughness: .35, metalness: .18 });
-  const trim = new THREE.MeshStandardMaterial({ color: 0x3b564e, roughness: .43, metalness: .58 });
+  const frame = new THREE.MeshStandardMaterial({ color: design.frame, roughness: .35, metalness: .18 });
+  const trim = new THREE.MeshStandardMaterial({ color: design.trim, roughness: .43, metalness: .58 });
   const dark = new THREE.MeshPhysicalMaterial({ color: 0x0e2020, roughness: .24, metalness: .33, clearcoat: .8 });
-  const light = new THREE.MeshBasicMaterial({ color: 0x94f0cc });
+  const light = new THREE.MeshBasicMaterial({ color: design.light });
   const shade = new THREE.MeshBasicMaterial({ color: 0x081414 });
 
-  addMesh(body, roundBox(1.52, 1.24, .64, .33), trim, 0, -.84);
-  addMesh(body, roundBox(1.36, .99, .26, .29), enamel, 0, -.77, .39);
+  addMesh(body, roundBox(...design.torso), trim, 0, -.84);
+  addMesh(body, roundBox(...design.chest), enamel, 0, -.77, .39);
   addMesh(body, roundBox(.53, .33, .09, .10), dark, 0, -.77, .59);
-  for (let index = 0; index < 3; index++) {
-    addMesh(body, roundBox(.045, .095, .01, .014), index === 1 ? cream : light, (index - 1) * .13, -.77, .67);
+  if (female) {
+    for (let index = 0; index < 3; index++) {
+      addMesh(body, roundBox(.045, .095, .01, .014), index === 1 ? frame : light, (index - 1) * .13, -.77, .67);
+    }
+  } else {
+    addMesh(body, new THREE.CapsuleGeometry(.032, .26, 5, 14), light, 0, -.77, .67).rotation.z = Math.PI / 2;
+    for (const side of [-1, 1]) {
+      addMesh(body, roundBox(.09, .10, .06, .018), frame, side * .60, -.60, .53);
+    }
   }
   addMesh(body, new THREE.CylinderGeometry(.34, .41, .39, 36), trim, 0, -.08);
 
   const arms = [-1, 1].map((side) => {
     const arm = new THREE.Group();
-    arm.position.set(side * .78, -.49, 0);
+    arm.position.set(side * design.shoulder, -.49, 0);
     body.add(arm);
-    ball(arm, trim, 0, 0, 0, .23, .23, .25);
+    if (female) ball(arm, trim, 0, 0, 0, .23, .23, .25);
+    else addMesh(arm, roundBox(.41, .37, .40, .12), trim);
     const outer = addMesh(arm, new THREE.CapsuleGeometry(.13, .39, 6, 18), enamel, side * .12, -.26, 0);
     outer.rotation.z = side * .39;
-    ball(arm, cream, side * .20, -.53, .04, .17, .19, .17);
+    ball(arm, frame, side * .20, -.53, .04, .17, .19, .17);
     return arm;
   });
 
-  addMesh(head, roundBox(2.28, 1.54, .96, .46), enamel);
-  addMesh(head, roundBox(2.00, 1.27, .20, .38), cream, 0, -.01, .51);
-  addMesh(head, roundBox(1.84, 1.10, .15, .34), dark, 0, -.01, .65);
+  addMesh(head, roundBox(...design.head), enamel);
+  addMesh(head, roundBox(...design.face), frame, 0, -.01, .51);
+  addMesh(head, roundBox(...design.glass), dark, 0, -.01, .65);
   const glass = new THREE.MeshBasicMaterial({ color: 0x97fff0, transparent: true, opacity: .18 });
   const highlight = ball(head, glass, -.44, .36, .787, .42, .025, .015);
   highlight.rotation.z = .09;
@@ -139,17 +176,26 @@ function makeAvatar(scene) {
   for (const side of [-1, 1]) {
     const ear = addMesh(head, new THREE.CylinderGeometry(.27, .27, .18, 32), trim, side * 1.19, .02, 0);
     ear.rotation.z = Math.PI / 2;
-    ball(head, cream, side * 1.30, .02, 0, .072, .18, .18);
+    ball(head, frame, side * 1.30, .02, 0, .072, .18, .18);
     ball(head, light, side * 1.36, .02, 0, .033, .089, .089);
   }
 
   const antenna = new THREE.Group();
-  antenna.position.set(.62, .72, -.08);
+  antenna.position.set(design.crown, .70, -.08);
   head.add(antenna);
-  addMesh(antenna, new THREE.CylinderGeometry(.045, .055, .39, 16), trim, 0, .16);
-  ball(antenna, cream, 0, .38, 0, .123, .123, .123);
-  ball(antenna, light, 0, .40, .07, .074, .074, .052);
-  const eyes = [-1, 1].map((side) => ball(head, light, side * .37, .096, .79, .115, .17, .047));
+  if (female) {
+    addMesh(antenna, new THREE.CylinderGeometry(.045, .055, .39, 16), trim, 0, .16);
+    ball(antenna, frame, 0, .40, 0, .123, .123, .123);
+    ball(antenna, light, 0, .42, .07, .074, .074, .052);
+  } else {
+    const receiver = addMesh(antenna, roundBox(.36, .21, .27, .07), frame, 0, .11);
+    receiver.rotation.z = -.08;
+    addMesh(antenna, roundBox(.19, .034, .02, .012), light, 0, .11, .177);
+    addMesh(head, roundBox(.24, .17, .25, .055), trim, .63, .75, -.06);
+  }
+  const eyes = [-1, 1].map((side) =>
+    ball(head, light, side * .37, .096, .79, design.eyeWidth, design.eyeHeight, .047),
+  );
   const brows = [-1, 1].map((side) => {
     const brow = addMesh(head, new THREE.CapsuleGeometry(.026, .17, 5, 12), light, side * .37, .33, .81);
     brow.rotation.z = Math.PI / 2;
@@ -187,7 +233,7 @@ function start() {
   spotlight(0xbafff1, 3.1, 3, 2, -3);
   spotlight(0xbad9fe, .9, 5, 1, 3);
 
-  const avatar = makeAvatar(scene);
+  const avatars = Object.fromEntries(Object.keys(characters).map((name) => [name, makeAvatar(scene, name)]));
   const halo = addMesh(scene, new THREE.TorusGeometry(1.79, .014, 8, 144),
     new THREE.MeshBasicMaterial({ color: 0x8cbcac, transparent: true, opacity: .34 }), 0, .36, -.86);
   halo.scale.y = .83;
@@ -214,7 +260,17 @@ function start() {
   let openMouth = 0;
   let blinkRemaining = 0;
   let nextBlink = oldAt + 2200;
+  let visibleCharacter;
   renderer.setAnimationLoop((at) => {
+    const avatar = avatars[state.character];
+    const design = characters[state.character];
+    if (visibleCharacter !== state.character) {
+      for (const [name, character] of Object.entries(avatars)) character.body.visible = name === state.character;
+      base.color.set(design.base);
+      halo.material.color.set(design.halo);
+      openMouth = 0;
+      visibleCharacter = state.character;
+    }
     const dt = Math.min(.05, (at - oldAt) / 1000);
     oldAt = at;
     const ease = Math.min(1, 10 * dt);
@@ -240,14 +296,14 @@ function start() {
     move(avatar.arms[0].rotation, "z", -.11 + .28 * openMouth + (state.emotion === "joy" ? .32 * gesture : 0));
     move(avatar.arms[1].rotation, "z", .11 + pose.arm + .25 * gesture);
     move(avatar.arms[1].rotation, "x", pose.arm + .17 * openMouth);
-    avatar.light.color.lerp(targetColor.set(face.hue), ease);
-    move(avatar.blush, "opacity", state.emotion === "joy" ? .66 : 0);
+    avatar.light.color.lerp(targetColor.set(state.emotion === "neutral" ? design.light : face.hue), ease);
+    move(avatar.blush, "opacity", state.character === "female" && state.emotion === "joy" ? .66 : 0);
 
     if (at >= nextBlink) { blinkRemaining = .17; nextBlink = at + 2600 + Math.random() * 1900; }
     blinkRemaining = Math.max(0, blinkRemaining - dt);
     const blink = blinkRemaining > 0 ? 1 - .93 * Math.sin(blinkRemaining / .17 * Math.PI) : 1;
     for (const [i, eye] of avatar.eyes.entries()) {
-      move(eye.scale, "y", .17 * face.eyes * blink);
+      move(eye.scale, "y", design.eyeHeight * face.eyes * blink);
       move(eye.position, "y", .10 + face.lift * .24 + (state.phase === "thinking" ? .04 : 0));
       move(avatar.brows[i].position, "y", .30 + face.lift);
       move(avatar.brows[i].rotation, "z", Math.PI / 2 + (i === 0 ? -1 : 1) * face.brow);
@@ -267,8 +323,8 @@ function start() {
 }
 
 try {
+  if (!demo) await poll();
   start();
-  if (!demo) poll();
 } catch (error) {
   document.querySelector("#render-error").hidden = false;
   console.error(error);
