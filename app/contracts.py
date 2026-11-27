@@ -208,6 +208,7 @@ class EffectResult(Contract):
     status: DeliveryStatus
     external_id: Ref | None = None
     error_code: Ref | None = None
+    retry_after_seconds: int | None = Field(default=None, ge=0, le=86_400)
 
 
 class PlanMeeting(Contract):

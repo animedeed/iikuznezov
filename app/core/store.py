@@ -3,14 +3,14 @@ from contextlib import closing, contextmanager
 from importlib.resources import files
 from json import dumps
 from pathlib import Path
-from sqlite3 import Connection, Row, connect
+from sqlite3 import Connection, Row, complete_statement, connect
 from uuid import uuid4
 
 from pydantic import TypeAdapter
 
 from app.contracts import Candidate, DocumentVersion, MailDispatch, MailReceipt, Profile, ReceiptResult
 
-_DATABASE_VERSION = 1
+_MIGRATIONS = ("001_initial.sql", "002_approvals.sql", "003_effects.sql")
 _candidate_adapter = TypeAdapter(Candidate)
 
 
@@ -37,12 +37,27 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as db:
             db.execute("PRAGMA journal_mode = WAL")
+        with self._connection(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > _DATABASE_VERSION:
+            if version > len(_MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this service")
-            if version == 0:
-                migration = files("migrations").joinpath("001_initial.sql")
-                db.executescript(migration.read_text(encoding="utf-8"))
+            for number, name in enumerate(_MIGRATIONS[version:], start=version + 1):
+                migration = files("migrations").joinpath(name).read_text(encoding="utf-8")
+                self._apply_migration(db, migration)
+                db.execute(f"PRAGMA user_version = {number}")
+
+    @staticmethod
+    def _apply_migration(db: Connection, sql: str) -> None:
+        statement = ""
+        for line in sql.splitlines(keepends=True):
+            statement += line
+            if complete_statement(statement):
+                # The original migration declared its own transaction and schema version.
+                if statement.strip().upper() not in {"BEGIN IMMEDIATE;", "COMMIT;", "PRAGMA USER_VERSION = 1;"}:
+                    db.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise RuntimeError("Incomplete SQL migration")
 
     def seed_profiles(self, seeds: Sequence[tuple[Profile, str, int]]) -> None:
         with self._connection(write=True) as db:
@@ -128,60 +143,74 @@ class Store:
         self, profile_id: str, source_id: str, candidate: Candidate, *,
         mail_dispatch: MailDispatch | None = None,
     ) -> DocumentVersion:
-        """Persist a first draft for local integration. Approval is a separate operation."""
+        """Persist a first draft without opening an approval."""
         with self._connection(write=True) as db:
-            origin = db.execute(
-                "SELECT source FROM inbox_events WHERE profile_id = ? AND event_id = ?",
-                (profile_id, source_id),
-            ).fetchone()
-            if origin is None:
-                raise LookupError("Unknown source in this profile")
-            expected_source = "mail" if candidate.kind == "mail_action" else "meeting"
-            if origin["source"] != expected_source:
-                raise ValueError("Draft kind does not match its source")
-            previous = db.execute(
-                """SELECT d.document_id, v.candidate, v.mail_dispatch FROM documents AS d
-                JOIN document_versions AS v USING (profile_id, document_id)
-                WHERE d.profile_id = ? AND d.source_event_id = ? AND d.kind = ? AND v.version = 1""",
-                (profile_id, source_id, candidate.kind),
-            ).fetchone()
-            if previous is not None:
-                return DocumentVersion(
-                    profile_id=profile_id, document_id=previous["document_id"], source_id=source_id,
-                    version=1, candidate=_candidate_adapter.validate_json(previous["candidate"]),
-                    mail_dispatch=(MailDispatch.model_validate_json(previous["mail_dispatch"])
-                                   if previous["mail_dispatch"] is not None else None),
-                )
-            document = DocumentVersion(
-                profile_id=profile_id, document_id=uuid4().hex, source_id=source_id,
-                version=1, candidate=candidate, mail_dispatch=mail_dispatch,
-            )
-            db.execute(
-                """INSERT INTO documents (profile_id, document_id, source_event_id, kind)
-                VALUES (?, ?, ?, ?)""",
-                (profile_id, document.document_id, document.source_id, candidate.kind),
-            )
-            db.execute(
-                """INSERT INTO document_versions (profile_id, document_id, version, candidate, mail_dispatch)
-                VALUES (?, ?, ?, ?, ?)""",
-                (profile_id, document.document_id, document.version, candidate.model_dump_json(),
-                 mail_dispatch.model_dump_json() if mail_dispatch is not None else None),
-            )
-            return document
+            return self._record_draft(db, profile_id, source_id, candidate, mail_dispatch)
+
+    @classmethod
+    def _record_draft(
+        cls, db: Connection, profile_id: str, source_id: str, candidate: Candidate,
+        mail_dispatch: MailDispatch | None,
+    ) -> DocumentVersion:
+        origin = db.execute(
+            "SELECT source FROM inbox_events WHERE profile_id = ? AND event_id = ?",
+            (profile_id, source_id),
+        ).fetchone()
+        if origin is None:
+            raise LookupError("Unknown source in this profile")
+        expected_source = "mail" if candidate.kind == "mail_action" else "meeting"
+        if origin["source"] != expected_source:
+            raise ValueError("Draft kind does not match its source")
+        previous = db.execute(
+            "SELECT document_id FROM documents WHERE profile_id = ? AND source_event_id = ? AND kind = ?",
+            (profile_id, source_id, candidate.kind),
+        ).fetchone()
+        if previous is not None:
+            saved = cls._get_version(db, profile_id, previous["document_id"], 1)
+            if saved is None:
+                raise RuntimeError("Document has no original version")
+            return saved
+        document = DocumentVersion(
+            profile_id=profile_id, document_id=uuid4().hex, source_id=source_id,
+            version=1, candidate=candidate, mail_dispatch=mail_dispatch,
+        )
+        db.execute(
+            """INSERT INTO documents (profile_id, document_id, source_event_id, kind)
+            VALUES (?, ?, ?, ?)""",
+            (profile_id, document.document_id, document.source_id, candidate.kind),
+        )
+        cls._insert_version(db, document)
+        return document
+
+    @staticmethod
+    def _insert_version(db: Connection, document: DocumentVersion) -> None:
+        db.execute(
+            """INSERT INTO document_versions (profile_id, document_id, version, candidate, mail_dispatch)
+            VALUES (?, ?, ?, ?, ?)""",
+            (document.profile_id, document.document_id, document.version, document.candidate.model_dump_json(),
+             document.mail_dispatch.model_dump_json() if document.mail_dispatch is not None else None),
+        )
 
     def get_version(self, profile_id: str, document_id: str, version: int) -> DocumentVersion | None:
         with self._connection() as db:
-            row = db.execute(
-                """SELECT d.source_event_id, v.candidate, v.mail_dispatch
-                FROM document_versions AS v JOIN documents AS d USING (profile_id, document_id)
-                WHERE v.profile_id = ? AND v.document_id = ? AND v.version = ?""",
-                (profile_id, document_id, version),
-            ).fetchone()
-            if row is None:
-                return None
-            return DocumentVersion(
-                profile_id=profile_id, document_id=document_id, source_id=row["source_event_id"],
-                version=version, candidate=_candidate_adapter.validate_json(row["candidate"]),
-                mail_dispatch=(MailDispatch.model_validate_json(row["mail_dispatch"])
-                               if row["mail_dispatch"] is not None else None),
-            )
+            return self._get_version(db, profile_id, document_id, version)
+
+    @staticmethod
+    def _get_version(
+        db: Connection, profile_id: str, document_id: str, version: int | None = None,
+    ) -> DocumentVersion | None:
+        row = db.execute(
+            """SELECT d.source_event_id, v.candidate, v.mail_dispatch, v.version
+            FROM document_versions AS v JOIN documents AS d USING (profile_id, document_id)
+            WHERE v.profile_id = ? AND v.document_id = ? AND (? IS NULL OR v.version = ?)
+            ORDER BY v.version DESC LIMIT 1""",
+            (profile_id, document_id, version, version),
+        ).fetchone()
+        if row is None:
+            return None
+        return DocumentVersion(
+            profile_id=profile_id, document_id=document_id, source_id=row["source_event_id"],
+            version=row["version"], candidate=_candidate_adapter.validate_json(row["candidate"]),
+            mail_dispatch=(MailDispatch.model_validate_json(row["mail_dispatch"])
+                           if row["mail_dispatch"] is not None else None),
+        )
