@@ -152,10 +152,12 @@ class ApprovalNoticeTransport:
     def __init__(
         self, api: TelegramAPI, approvals: ApprovalService,
         chat_for: Callable[[str, TelegramActor], int | None],
+        record_card: Callable[[str, str, TelegramActor, int, int], None] | None = None,
     ):
         self.api = api
         self.approvals = approvals
         self.chat_for = chat_for
+        self.record_card = record_card
 
     def execute(self, effect: Effect) -> EffectResult:
         if effect.kind != EffectKind.TELEGRAM or effect.payload.get("operation") != "approval_notice":
@@ -168,12 +170,16 @@ class ApprovalNoticeTransport:
         if chat_id is None:
             return EffectResult(status=DeliveryStatus.FAILED, error_code="chat_unbound")
         pages, markup = render_card(card)
-        return deliver_pages(self.api, chat_id, pages, markup=markup)
+        result = deliver_pages(self.api, chat_id, pages, markup=markup)
+        if result.status == DeliveryStatus.SENT and self.record_card is not None:
+            self.record_card(effect.target_ref, effect.profile_id, actor, chat_id, int(result.external_id))
+        return result
 
 
 def handle_update(
     api: TelegramAPI, approvals: ApprovalPort, update: dict[str, Any],
     *, on_revision: Callable[[str, TelegramActor], str | None] | None = None,
+    check_card: Callable[[str, int, int], bool] | None = None,
 ) -> None:
     callback = update.get("callback_query")
     if not isinstance(callback, dict):
@@ -197,6 +203,14 @@ def handle_update(
     ):
         api.call("answerCallbackQuery", callback_query_id=callback_id, text="Некорректная кнопка.")
         return
+    message = callback.get("message")
+    if check_card is not None:
+        chat = message.get("chat") if isinstance(message, dict) else None
+        chat_id = chat.get("id") if isinstance(chat, dict) else None
+        message_id = message.get("message_id") if isinstance(message, dict) else None
+        if type(chat_id) is not int or type(message_id) is not int or not check_card(approval_id, chat_id, message_id):
+            api.call("answerCallbackQuery", callback_query_id=callback_id, text="Карточка недоступна.", show_alert=True)
+            return
     actor = TelegramActor(telegram_user_id=user_id)
     status = approvals.decide(approval_id, actor, decision)
     accepted = status == DecisionStatus.ACCEPTED
@@ -209,7 +223,6 @@ def handle_update(
             text = prompt
     answer = text if len(text) <= 180 else "Сессия правки открыта. Команды указаны в сообщении."
     api.call("answerCallbackQuery", callback_query_id=callback_id, text=answer, show_alert=not accepted)
-    message = callback.get("message")
     if accepted and isinstance(message, dict):
         chat = message.get("chat")
         if isinstance(chat, dict) and type(chat.get("id")) is int and type(message.get("message_id")) is int:

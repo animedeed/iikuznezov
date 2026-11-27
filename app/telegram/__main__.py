@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from json import dumps, loads
 from os import environ
 from pathlib import Path
+from re import fullmatch
 from sqlite3 import Connection, connect
 from time import sleep, time
 
@@ -20,6 +21,7 @@ from app.core.approvals import ApprovalService, EffectIntent
 from app.core.effects import EffectQueue
 from app.core.store import Store
 from app.telegram.bot import ApprovalNoticeTransport, TelegramAPI, TelegramError, handle_update
+from app.telegram.channel import TelegramChannel
 from app.telegram.delivery_updates import DeliveryUpdates
 from app.telegram.demo_minutes import REVISION_HINT, minutes_intents, prepare_minutes, revise_minutes
 from app.telegram.demo_plans import build_demo_plan
@@ -187,6 +189,7 @@ class DemoRevision:
 def poll(
     api: TelegramAPI, approvals: ApprovalService, queue: EffectQueue, transport: DemoTransport,
     inbox: Path, document_id: str, plans: PlanCommands, morning: MorningPlans | None,
+    channel: TelegramChannel | None = None,
 ):
     with closing(connect(inbox)) as db:
         db.execute("""CREATE TABLE IF NOT EXISTS updates
@@ -221,8 +224,11 @@ def poll(
                 delay = 0
                 try:
                     update = loads(body)
-                    if not plans.handle(update) and not revision.handle(api, update):
-                        handle_update(api, approvals, update, on_revision=revision.open)
+                    if not revision.handle(api, update):
+                        if channel is not None:
+                            channel.handle_update(update, on_revision=revision.open)
+                        elif not plans.handle(update):
+                            handle_update(api, approvals, update, on_revision=revision.open)
                 except TelegramError as error:
                     state = "failed"
                     delay = error.retry_after
@@ -243,10 +249,13 @@ def main():
     parser.add_argument("--get-me", action="store_true", help="Проверить токен и выйти")
     parser.add_argument("--identify", action="store_true", help="Показать ID из свежих команд /start")
     parser.add_argument("--scenario", choices=("mail", "minutes"), default="mail", help="Тип тестовой карточки")
+    parser.add_argument("--run-id", help="Имя нового прогона с отдельной локальной базой")
     morning_mode = parser.add_mutually_exclusive_group()
     morning_mode.add_argument("--morning-plan", action="store_true", help="Отправлять план в 08:30 по Москве")
     morning_mode.add_argument("--send-morning-now", action="store_true", help="Отправить сегодняшний план и выйти")
     args = parser.parse_args()
+    if args.run_id is not None and not fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", args.run_id):
+        parser.error("Имя прогона должно содержать до 32 строчных латинских букв, цифр или дефисов")
     token = environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         parser.error("Укажите TELEGRAM_BOT_TOKEN в окружении")
@@ -261,7 +270,10 @@ def main():
             if webhook["url"]:
                 parser.error("У бота активен webhook. Для прогона используйте отдельного тестового бота.")
             if args.identify:
-                print(f"Отправьте /start в личном чате с @{bot['username']}. Жду до 25 секунд.", flush=True)
+                print(
+                    f"Отправьте /start в личном чате или /start@{bot['username']} в тестовой группе. "
+                    "Жду до 25 секунд.", flush=True,
+                )
                 found = False
                 for update in api.updates():
                     message = update.get("message", {})
@@ -296,6 +308,8 @@ def main():
                     parser.exit(1)
                 return
             suffix = "-minutes" if args.scenario == "minutes" else ""
+            if args.run_id:
+                suffix += f"-run-{args.run_id}"
             folder = Path("data") / f"telegram-demo-{bot['id']}-{args.user_id}{suffix}"
             folder.mkdir(parents=True, exist_ok=True)
             store = Store(folder / "demo.sqlite3")
@@ -313,15 +327,25 @@ def main():
             def profiles_for(user_id):
                 return {"telegram-demo": "Тестовый профиль"} if user_id == args.user_id else {}
 
-            transport = DemoTransport(
-                ApprovalNoticeTransport(api, approvals, chat_for),
-                DeliveryUpdates(approvals, api, chat_for),
-            )
-            plans = PlanCommands(api, profiles_for, build_demo_plan, bot_username=bot["username"])
+            channel = None
+            if args.run_id:
+                channel = TelegramChannel(
+                    approvals, api, bot_id=bot["id"], bot_username=bot["username"],
+                    context_db=folder / "telegram-context.sqlite3", chat_for=chat_for,
+                    profiles_for=profiles_for, build_plan=build_demo_plan,
+                )
+                transport = DemoTransport(channel.notices, channel.delivery_updates)
+                plans = channel.plans
+            else:
+                transport = DemoTransport(
+                    ApprovalNoticeTransport(api, approvals, chat_for),
+                    DeliveryUpdates(approvals, api, chat_for),
+                )
+                plans = PlanCommands(api, profiles_for, build_demo_plan, bot_username=bot["username"])
             print(f"Тестовый опрос @{bot['username']}. База: {store.path}", flush=True)
             poll(
                 api, approvals, EffectQueue(store), transport, folder / "inbox.sqlite3",
-                document.document_id, plans, morning,
+                document.document_id, plans, morning, channel,
             )
     except TelegramError as error:
         if error.code == 409:
