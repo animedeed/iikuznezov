@@ -97,7 +97,13 @@ def test_preference_changes_only_its_own_profile(store, approvals, source_factor
     assert "Пиши кратко" in m1.calls[0][0]["content"] and "Пиши кратко" not in m2.calls[0][0]["content"]
 
 
+def need_ics_libs():
+    pytest.importorskip("icalendar")
+    pytest.importorskip("recurring_ical_events")
+
+
 def test_ics_expands_recurrence_keeps_all_day_and_merge_dedupes():
+    need_ics_libs()
     ics = IcsCalendar({"p1": ICS})
     got = {e.title: e for e in ics.list_events("p1", *DAY)}
     assert set(got) == {"Планёрка", "Выходной партнёра"} and got["Выходной партнёра"].all_day
@@ -114,6 +120,7 @@ def timed(uid, hour):
 
 
 def test_busy_protected_and_provider_conflict(store, approvals, source_factory, model_factory, draft, ids):
+    need_ics_libs()
     card = approved(store, approvals, source_factory, model_factory, draft, ids)
     doc, ver = card.document.document_id, card.document.version
     live = FakeCalendar()
