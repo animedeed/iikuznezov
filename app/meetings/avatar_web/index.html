@@ -5,12 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>3D-аватар для Телемоста</title>
   <link rel="stylesheet" href="/avatar.css">
+  <script type="importmap">{"imports":{"three":"/three.module.js"}}</script>
   <script type="module" src="/avatar.js"></script>
 </head>
 <body>
   <main class="layout">
     <section class="stage" aria-label="3D-аватар">
       <canvas id="portrait" aria-label="Анимированный объёмный персонаж"></canvas>
+      <p id="loading" class="render-error" role="status" hidden>Загружается 3D-модель…</p>
       <p id="render-error" class="render-error" hidden>Для 3D-сцены нужен браузер с WebGL 2.</p>
     </section>
     <aside class="controls" id="controls" hidden>
@@ -21,8 +23,8 @@
       <fieldset class="characters">
         <legend>Образ</legend>
         <div class="character-options">
-          <button type="button" data-character="female">Женский</button>
-          <button type="button" data-character="male">Мужской</button>
+          <button type="button" data-character="female">София</button>
+          <button type="button" data-character="male">Даниэль</button>
         </div>
       </fieldset>
       <div class="status"><i></i><output id="status" aria-live="polite">Ожидает</output></div>

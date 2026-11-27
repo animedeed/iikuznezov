@@ -1,5 +1,5 @@
-import * as THREE from "/three.module.js";
-import { makeHuman } from "/human.js";
+import * as THREE from "three";
+import { loadAvatar } from "/rocketbox.js";
 
 const params = new URLSearchParams(location.search);
 const demo = params.has("demo");
@@ -11,17 +11,12 @@ const names = {
   joy: "радость", surprise: "удивление", concern: "озабоченность",
 };
 const poses = {
-  idle: { body: -.015, nod: .015, lean: 0, yaw: -.055, gazeX: 0, gazeY: 0 },
-  listening: { body: .072, nod: .06, lean: -.025, yaw: -.13, gazeX: .006, gazeY: .003 },
-  thinking: { body: -.06, nod: -.085, lean: .025, yaw: .10, gazeX: .022, gazeY: .023 },
-  speaking: { body: .018, nod: -.008, lean: 0, yaw: 0, gazeX: 0, gazeY: 0 },
+  idle: { nod: .01, yaw: -.015, tilt: 0 },
+  listening: { nod: .06, yaw: -.07, tilt: -.02 },
+  thinking: { nod: -.035, yaw: .06, tilt: .024 },
+  speaking: { nod: -.008, yaw: 0, tilt: 0 },
 };
-const expressions = {
-  neutral: { eyes: .88, brow: 0, lift: 0, smile: .022, tilt: 0, mouth: 0 },
-  joy: { eyes: .81, brow: .016, lift: .035, smile: .128, tilt: -.055, mouth: .17 },
-  surprise: { eyes: 1.29, brow: 0, lift: .11, smile: -.012, tilt: .035, mouth: .42 },
-  concern: { eyes: .81, brow: -.105, lift: .052, smile: -.075, tilt: .102, mouth: .045 },
-};
+const emotionTilt = { neutral: 0, joy: -.025, surprise: .03, concern: .055 };
 const characters = new Set(["female", "male"]);
 const previewCharacter = params.get("character");
 const initialCharacter = demo && characters.has(previewCharacter) ? previewCharacter : "female";
@@ -32,7 +27,7 @@ let lastPoll = -Infinity;
 
 function update(next) {
   if (!characters.has(next.character) || !Object.hasOwn(poses, next.phase)
-      || !Object.hasOwn(expressions, next.emotion)) return;
+      || !Object.hasOwn(emotionTilt, next.emotion)) return;
   if (state.phase !== next.phase || state.emotion !== next.emotion || state.character !== next.character) {
     changedAt = performance.now();
   }
@@ -80,83 +75,101 @@ async function poll() {
 
 function start() {
   const canvas = document.querySelector("#portrait");
+  const loading = document.querySelector("#loading");
+  const error = document.querySelector("#render-error");
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
   renderer.setClearColor(0, 0);
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.11;
+  renderer.toneMapping = THREE.NeutralToneMapping;
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(34, 1, .1, 60);
-  scene.add(new THREE.HemisphereLight(0xfff1de, 0x76504e, 1.48));
-  function spotlight(color, strength, x, y, z) {
-    const lamp = new THREE.DirectionalLight(color, strength);
+  const camera = new THREE.PerspectiveCamera(32, 1, .05, 12);
+  scene.add(new THREE.HemisphereLight(0xfcf4e9, 0xa0aac2, 1.62));
+  function light(color, intensity, x, y, z) {
+    const lamp = new THREE.DirectionalLight(color, intensity);
     lamp.position.set(x, y, z);
     scene.add(lamp);
   }
-  spotlight(0xffe4cc, 2.7, -3, 5, 6);
-  spotlight(0xbddcf0, 2.15, 3, 2.3, -3);
-  spotlight(0xcbd4fa, .74, 4, 1.5, 4);
+  light(0xffecd9, 1.75, -2, 3.5, 3.6);
+  light(0xd8e4fb, .59, 2.4, 2.0, 2.7);
+  light(0xccdcff, 1.22, 2.5, 2.7, -2.8);
 
-  const avatars = Object.fromEntries([...characters].map((name) => [name, makeHuman(scene, name)]));
+  const models = new Map();
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
+  let selected;
+  let loadGeneration = 0;
+  let avatar;
   const resize = () => {
     const { clientWidth: width, clientHeight: height } = canvas;
     camera.aspect = Math.max(width, 1) / Math.max(height, 1);
-    camera.position.set(0, .32, Math.max(6.82, 4.77 / camera.aspect));
-    camera.lookAt(0, .005, 0);
+    if (avatar) {
+      const { x, y, z } = avatar.focus;
+      camera.position.set(x, y + .028, z + Math.max(.83, .80 / camera.aspect));
+      camera.lookAt(x, y, z);
+    }
     camera.updateProjectionMatrix();
     renderer.setSize(width, height, false);
   };
   new ResizeObserver(resize).observe(canvas);
   resize();
-  document.documentElement.dataset.renderer = "webgl2";
+
+  async function show(character) {
+    selected = character;
+    const generation = ++loadGeneration;
+    if (avatar) scene.remove(avatar.scene);
+    avatar = undefined;
+    delete document.documentElement.dataset.activeCharacter;
+    loading.hidden = false;
+    error.hidden = true;
+    if (!models.has(character)) models.set(character, loadAvatar(character));
+    try {
+      const next = await models.get(character);
+      if (generation !== loadGeneration) return;
+      avatar = next;
+      scene.add(avatar.scene);
+      resize();
+      document.documentElement.dataset.renderer = "webgl2";
+      document.documentElement.dataset.activeCharacter = character;
+    } catch (reason) {
+      models.delete(character);
+      if (generation !== loadGeneration) return;
+      error.textContent = "Не удалось загрузить 3D-модель. Обновите страницу и проверьте консоль клиента.";
+      error.hidden = false;
+      console.error(reason);
+    } finally {
+      if (generation === loadGeneration) loading.hidden = true;
+    }
+  }
+
   let oldAt = performance.now();
   let openMouth = 0;
-  let blinkRemaining = 0;
-  let nextBlink = oldAt + 2200;
-  let visibleCharacter;
+  let nextBlink = oldAt + 2000;
+  let blinkStarted = -Infinity;
   renderer.setAnimationLoop((at) => {
-    const avatar = avatars[state.character];
-    if (visibleCharacter !== state.character) {
-      for (const [name, character] of Object.entries(avatars)) character.body.visible = name === state.character;
+    if (selected !== state.character) {
       openMouth = 0;
-      visibleCharacter = state.character;
+      void show(state.character);
     }
     const dt = Math.min(.05, (at - oldAt) / 1000);
     oldAt = at;
-    const ease = Math.min(1, 10 * dt);
-    const t = at / 1000;
-    const pose = poses[state.phase];
-    const face = expressions[state.emotion];
-    const speech = state.phase === "speaking";
-    const elapsed = Math.max(0, (at - receivedAt) / 1000);
-    const rawLevel = demo && speech ? .35 + .30 * Math.sin(t * 17) ** 2 : state.levels[Math.floor(elapsed * 30)] ?? 0;
-    openMouth = THREE.MathUtils.lerp(openMouth, speech ? rawLevel : 0, ease);
-    const move = (object, axis, value) => {
-      object[axis] = THREE.MathUtils.lerp(object[axis], value, ease);
-    };
-    const motion = reduced.matches ? .2 : 1;
-    const age = Math.max(0, (at - changedAt) / 1000);
-    const gesture = Math.sin(Math.min(age, .8) / .8 * Math.PI) * motion;
-    move(avatar.body.position, "y", Math.sin(t * 1.65) * .015 * motion + (state.emotion === "surprise" ? .045 * gesture : 0));
-    move(avatar.body.rotation, "x", pose.body);
-    move(avatar.body.rotation, "z", pose.lean + Math.sin(t * 1.46) * .012 * motion);
-    move(avatar.head.rotation, "y", pose.yaw + Math.sin(t * 1.7) * .018 * motion);
-    move(avatar.head.rotation, "x", pose.nod + (state.phase === "listening" ? .12 * gesture : .044 * openMouth));
-    move(avatar.head.rotation, "z", face.tilt + Math.sin(t * 1.4) * .025 * motion);
-
-    if (at >= nextBlink) { blinkRemaining = .15; nextBlink = at + 2700 + Math.random() * 2000; }
-    blinkRemaining = Math.max(0, blinkRemaining - dt);
-    const blink = blinkRemaining > 0 ? 1 - .96 * Math.sin(blinkRemaining / .15 * Math.PI) : 1;
-    avatar.express({
-      open: face.eyes * blink,
-      browLift: face.lift,
-      browTilt: face.brow,
-      gazeX: pose.gazeX - pose.yaw * .07,
-      gazeY: pose.gazeY,
-      smile: face.smile,
-      mouthOpen: Math.max(face.mouth, openMouth),
-    }, ease);
+    if (avatar) {
+      const pose = poses[state.phase];
+      const speech = state.phase === "speaking";
+      const elapsed = Math.max(0, (at - receivedAt) / 1000);
+      const raw = demo && speech ? .32 + .34 * Math.sin(at / 60) ** 2 : state.levels[Math.floor(elapsed * 30)] ?? 0;
+      openMouth = THREE.MathUtils.lerp(openMouth, speech ? raw : 0, Math.min(1, 12 * dt));
+      if (at >= nextBlink) {
+        blinkStarted = at;
+        nextBlink = at + 2700 + Math.random() * 2000;
+      }
+      const blinkTime = Math.min(1, Math.max(0, (at - blinkStarted) / 155));
+      const motion = reduced.matches ? .2 : 1;
+      const age = Math.min(1, Math.max(0, (at - changedAt) / 650));
+      const nod = pose.nod + (state.phase === "listening" ? .12 * Math.sin(age * Math.PI) : .04 * openMouth);
+      avatar.animate({
+        phase: state.phase, emotion: state.emotion, mouth: openMouth, blink: Math.sin(blinkTime * Math.PI),
+        nod: motion * nod, yaw: motion * pose.yaw, tilt: motion * (pose.tilt + emotionTilt[state.emotion]), motion,
+      }, dt);
+    }
     renderer.render(scene, camera);
   });
 }

@@ -21,7 +21,7 @@ test = ["pytest==9.2.0"]
 include = ["app*", "migrations"]
 
 [tool.setuptools.package-data]
-"app.meetings" = ["avatar_web/*.html", "avatar_web/*.css", "avatar_web/*.js", "avatar_web/*.json"]
+"app.meetings" = ["avatar_web/*.html", "avatar_web/*.css", "avatar_web/*.js", "avatar_web/*.json", "avatar_web/models/*.glb", "avatar_web/models/*.md"]
 migrations = ["*.sql"]
 
 [tool.pytest.ini_options]

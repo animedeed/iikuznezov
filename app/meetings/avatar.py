@@ -5,8 +5,10 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from math import sqrt
+from os import fstat
 from pathlib import Path
 import re
+from shutil import copyfileobj
 import sys
 from threading import Lock, Thread
 from time import monotonic
@@ -14,13 +16,29 @@ from time import monotonic
 from . import SAMPLE_RATE
 
 _WEB = Path(__file__).with_name("avatar_web")
+_JAVASCRIPT = "text/javascript; charset=utf-8"
+_GLTF = "model/gltf-binary"
+# The script hash authorizes the import map in index.html.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'sha256-p9ruqrrvUoHk8B1W8x6/urtDxl5eLM2f53RCknrG03c='; "
+    "img-src 'self' blob:; connect-src 'self' blob:; frame-ancestors 'none'"
+)
 _FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/avatar.css": ("avatar.css", "text/css; charset=utf-8"),
-    "/avatar.js": ("avatar.js", "text/javascript; charset=utf-8"),
-    "/human.js": ("human.js", "text/javascript; charset=utf-8"),
-    "/three.module.js": ("node_modules/three/build/three.module.js", "text/javascript; charset=utf-8"),
-    "/three.core.js": ("node_modules/three/build/three.core.js", "text/javascript; charset=utf-8"),
+    "/avatar.js": ("avatar.js", _JAVASCRIPT),
+    "/rocketbox.js": ("rocketbox.js", _JAVASCRIPT),
+    "/three/addons/loaders/GLTFLoader.js": (
+        "node_modules/three/examples/jsm/loaders/GLTFLoader.js", _JAVASCRIPT,
+    ),
+    "/three/addons/utils/BufferGeometryUtils.js": (
+        "node_modules/three/examples/jsm/utils/BufferGeometryUtils.js", _JAVASCRIPT,
+    ),
+    "/models/sophia_formal.glb": ("models/sophia_formal.glb", _GLTF),
+    "/models/daniel_formal.glb": ("models/daniel_formal.glb", _GLTF),
+    "/three.module.js": ("node_modules/three/build/three.module.js", _JAVASCRIPT),
+    "/three.core.js": ("node_modules/three/build/three.core.js", _JAVASCRIPT),
 }
 DEFAULT_CHARACTER = "female"
 CHARACTER_VOICES = {"female": "marina", "male": "filipp"}
@@ -91,20 +109,26 @@ def camera_server(avatar: AvatarState, port: int):
                 return
             filename, mimetype = entry
             try:
-                body = (_WEB / filename).read_bytes()
+                with (_WEB / filename).open("rb") as asset:
+                    self._headers(fstat(asset.fileno()).st_size, mimetype)
+                    copyfileobj(asset, self.wfile, 128 * 1024)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except FileNotFoundError:
                 self.send_error(404)
-                return
-            self._send(body, mimetype)
 
-        def _send(self, body: bytes, mimetype: str):
+        def _headers(self, size: int, mimetype: str):
             self.send_response(200)
             self.send_header("Content-Type", mimetype)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-store" if mimetype == "application/json" else "no-cache")
-            self.send_header("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", _CSP)
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
+
+        def _send(self, body: bytes, mimetype: str):
             try:
+                self._headers(len(body), mimetype)
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
