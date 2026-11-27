@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "mail_receipts": [
+    {
+      "channel_id": "demo-mail-sales",
+      "folder": "INBOX",
+      "uidvalidity": 42,
+      "uid": 101,
+      "fixture_id": "m001",
+      "from": "customer@example.invalid",
+      "subject": "Подтверждение срока поставки",
+      "text": "Можете гарантировать поставку в эту пятницу?",
+      "received_at": "2026-12-07T07:00:00Z"
+    },
+    {
+      "channel_id": "demo-mail-sales",
+      "folder": "INBOX",
+      "uidvalidity": 42,
+      "uid": 102,
+      "fixture_id": "m002",
+      "from": "buyer@example.invalid",
+      "subject": "Запрос коммерческого предложения",
+      "text": "Пришлите КП на десять тестовых единиц.",
+      "received_at": "2026-12-07T07:05:00Z"
+    }
+  ],
+  "mail_expected": [
+    {
+      "fixture_id": "m001",
+      "route": "review",
+      "policy_class": "customer_commitment",
+      "approver_role": "leader",
+      "action_effects_before_approval": 0
+    },
+    {
+      "fixture_id": "m002",
+      "route": "forward_sales",
+      "target_ref": "sales-desk",
+      "effect_type": "email",
+      "action_effects_before_approval": 1
+    }
+  ],
+  "approval_request": {
+    "approval_id": "demo-approval-v2",
+    "profile_id": "demo-p1",
+    "document_id": "demo-minutes",
+    "version": 2,
+    "actor_ref": "meeting-initiator",
+    "status": "pending_approval",
+    "actions": [
+      "approve",
+      "reject",
+      "revise"
+    ]
+  },
+  "approval_attempts": [
+    {
+      "version": 1,
+      "actor_ref": "meeting-initiator",
+      "expected": "stale"
+    },
+    {
+      "version": 2,
+      "actor_ref": "other-user",
+      "expected": "forbidden"
+    },
+    {
+      "version": 2,
+      "actor_ref": "meeting-initiator",
+      "expected": "accepted"
+    },
+    {
+      "version": 2,
+      "actor_ref": "meeting-initiator",
+      "expected": "already_decided"
+    }
+  ],
+  "meeting_turns": [
+    {
+      "request_id": "turn-1",
+      "sequence": 1,
+      "text": "В четверг можем отправить черновик КП.",
+      "role": "participant"
+    }
+  ],
+  "minutes_version": {
+    "document_id": "demo-minutes",
+    "profile_id": "demo-p1",
+    "version": 2,
+    "meeting_id": "demo-meeting",
+    "title": "Учебная встреча по поставке",
+    "occurred_at": "2026-12-07T08:00:00Z",
+    "participant_refs": [
+      "meeting-initiator",
+      "sales-desk"
+    ],
+    "summary": "К четвергу нужен черновик КП.",
+    "decisions": [
+      {
+        "text": "Подготовить черновик КП.",
+        "source_turn_ids": [
+          "turn-1"
+        ]
+      }
+    ],
+    "open_questions": [
+      {
+        "text": "Кто подтвердит дату поставки?",
+        "source_turn_ids": [
+          "turn-1"
+        ]
+      }
+    ],
+    "tasks": [
+      {
+        "task_ref": "task-1",
+        "action": "Подготовить черновик КП",
+        "assignee_ref": "sales-desk",
+        "due_date": "2026-12-10",
+        "status": "draft",
+        "source_turn_ids": [
+          "turn-1"
+        ]
+      },
+      {
+        "task_ref": "task-2",
+        "action": "Подтвердить дату поставки",
+        "assignee_ref": null,
+        "due_date": null,
+        "status": "needs_clarification",
+        "source_turn_ids": []
+      }
+    ]
+  },
+  "effect_example": {
+    "effect_id": "demo-effect-1",
+    "profile_id": "demo-p1",
+    "key": "demo-p1:demo-minutes:v2:email:sales-desk",
+    "kind": "email",
+    "target_ref": "sales-desk",
+    "document_id": "demo-minutes",
+    "version": 2,
+    "status": "pending"
+  },
+  "plan_example": {
+    "profile_id": "demo-p1",
+    "date": "2026-12-07",
+    "period": "day",
+    "timezone": "Europe/Moscow",
+    "meetings": [
+      {
+        "id": "demo-meeting",
+        "title": "Учебная встреча по поставке"
+      }
+    ],
+    "tasks_due": [
+      {
+        "id": "demo-task-0",
+        "title": "Проверить прогноз",
+        "due_date": "2026-12-07"
+      }
+    ],
+    "overdue": [],
+    "previous_workday": "2026-12-04",
+    "previous_workday_results": [],
+    "mail_statuses": [],
+    "pending_approvals": [
+      "demo-approval-v2"
+    ]
+  }
+}
