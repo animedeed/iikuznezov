@@ -18,6 +18,7 @@ _FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/avatar.css": ("avatar.css", "text/css; charset=utf-8"),
     "/avatar.js": ("avatar.js", "text/javascript; charset=utf-8"),
+    "/human.js": ("human.js", "text/javascript; charset=utf-8"),
     "/three.module.js": ("node_modules/three/build/three.module.js", "text/javascript; charset=utf-8"),
     "/three.core.js": ("node_modules/three/build/three.core.js", "text/javascript; charset=utf-8"),
 }
