@@ -177,3 +177,33 @@ def test_settings_from_env(monkeypatch):
     loaded = SmtpSettings.from_env()
     assert loaded.host == "smtp.yandex.ru" and loaded.port == 465 and loaded.recipients == {"sales-desk": "s@example.test"}
     assert "pw" not in repr(loaded)
+
+
+def test_pinned_recipient_cannot_drift():
+    from app.mail.smtp import recipient_fingerprint
+
+    smtp = SmtpEmailTransport(SETTINGS, smtp_factory=FakeSmtp, require_recipient_fingerprint=True)
+    assert smtp.send_email(effect()).error_code == "recipient_not_pinned"
+    candidate = effect()
+    pinned_to_old_address = {**candidate.payload, "recipient_fingerprint": recipient_fingerprint("old@example.test")}
+    result = smtp.send_email(candidate.model_copy(update={"payload": pinned_to_old_address}))
+    assert (result.status, result.error_code) == (DeliveryStatus.FAILED, "recipient_changed")
+    assert not FakeSmtp.instances
+
+    pinned = {**candidate.payload, "recipient_fingerprint": recipient_fingerprint("sales@example.test")}
+    assert smtp.send_email(candidate.model_copy(update={"payload": pinned})).status == DeliveryStatus.SENT
+
+
+def test_timeout_before_data_is_safe_to_retry():
+    class BeforeData(FakeSmtp):
+        data_started = False
+
+    BeforeData.fail = {"send": socket.timeout()}
+    result = SmtpEmailTransport(SETTINGS, smtp_factory=BeforeData).send_email(effect())
+    assert (result.status, result.error_code) == (DeliveryStatus.RETRYABLE, "smtp_envelope_failed")
+
+
+@pytest.mark.parametrize("address", ["local@", "local@a..b", "local@bad_domain.test", "buyer@example.test\n"])
+def test_invalid_from_is_rejected_during_configuration(address):
+    with pytest.raises(ValueError, match="YANDEX_MAIL_ADDRESS"):
+        SmtpSettings(username=address, password="secret")
