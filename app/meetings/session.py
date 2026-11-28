@@ -1,6 +1,7 @@
 """Process one explicitly captured utterance at a time."""
 
 import sys
+from collections.abc import Callable
 from time import monotonic
 from typing import TextIO
 
@@ -9,6 +10,7 @@ from app.ports import ModelPort
 
 from .audio import AudioError, PulseAudio
 from .avatar import AvatarState, reaction
+from .client import MeetingClient, MeetingClientError
 from .speech import SpeechError, YandexSpeech
 
 _INSTRUCTIONS = (
@@ -25,16 +27,21 @@ _MODEL_FAILURE = "Сейчас не могу подготовить ответ. 
 
 
 def run_session(
-    audio: PulseAudio, speech: YandexSpeech, model: ModelPort, terminal: TextIO, seconds: int,
-    *, avatar: AvatarState | None = None,
+    audio: PulseAudio, speech: YandexSpeech, model: ModelPort | None, terminal: TextIO, seconds: int,
+    *, avatar: AvatarState | None = None, meeting: MeetingClient | None = None,
 ) -> None:
+    if model is None and meeting is None:
+        raise ValueError("A local model or meeting client is required")
     if not _ready(
         terminal, "Когда вы войдёте в комнату, нажмите Enter для приветствия. Для выхода введите q."
     ):
         return
-    _speak(audio, speech, _GREETING, avatar=avatar, emotion="joy")
+    greeting = _meeting_request(meeting.start, terminal) if meeting is not None else _GREETING
+    _speak(audio, speech, greeting, avatar=avatar, emotion="joy")
     history: list[dict[str, str]] = []
-    while _ready(terminal, "Enter — слушать реплику, q — выход."):
+    accepted_turns = 0
+    end = "завершить встречу" if meeting is not None else "выход"
+    while _ready(terminal, f"Enter — слушать реплику, q — {end}."):
         if avatar:
             avatar.set("listening")
         pcm = audio.record(terminal, seconds)
@@ -55,17 +62,46 @@ def run_session(
         emotion = reaction(text) if avatar else "neutral"
         if avatar:
             avatar.set("thinking", emotion)
-        history.append({"role": "user", "content": text})
-        try:
-            reply = model.reply([{"role": "system", "content": _INSTRUCTIONS}, *history[-9:]])
-        except ModelAdapterError as error:
-            status = f" HTTP {error.http_status}" if error.http_status else ""
-            print(f"Модель не ответила ({error.code}{status}).", file=sys.stderr)
-            reply = _MODEL_FAILURE
-            emotion = "concern"
-        history.append({"role": "assistant", "content": reply})
-        del history[:-8]
+        if meeting is not None:
+            if len(text) > 100_000:
+                _speak(audio, speech, _REPEAT, avatar=avatar, emotion="concern", ended_at=ended_at)
+                continue
+            answer = _meeting_request(lambda: meeting.turn(text), terminal)
+            accepted_turns += 1
+            reply = answer.reply_text
+            if answer.approval_required:
+                print("Вопрос требует согласования руководителя.")
+        else:
+            assert model is not None
+            history.append({"role": "user", "content": text})
+            try:
+                reply = model.reply([{"role": "system", "content": _INSTRUCTIONS}, *history[-9:]])
+            except ModelAdapterError as error:
+                status = f" HTTP {error.http_status}" if error.http_status else ""
+                print(f"Модель не ответила ({error.code}{status}).", file=sys.stderr)
+                reply = _MODEL_FAILURE
+                emotion = "concern"
+            history.append({"role": "assistant", "content": reply})
+            del history[:-8]
         _speak(audio, speech, reply, avatar=avatar, emotion=emotion, ended_at=ended_at)
+    if meeting is not None:
+        if accepted_turns:
+            _meeting_request(meeting.finish, terminal)
+            print("Расшифровка поставлена в очередь на подготовку протокола.")
+        else:
+            print("Сервер не получил реплик. Расшифровка не создана.")
+
+
+def _meeting_request[T](send: Callable[[], T], terminal: TextIO) -> T:
+    while True:
+        try:
+            return send()
+        except MeetingClientError as error:
+            if not error.retryable:
+                raise
+            print(f"Подтверждение сервера не получено ({error}).", file=sys.stderr)
+            if not _ready(terminal, "Enter — повторить тот же запрос, q — выйти."):
+                raise
 
 
 def _ready(terminal: TextIO, prompt: str) -> bool:

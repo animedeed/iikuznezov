@@ -38,6 +38,8 @@ def main() -> int:
     parser.add_argument("--source", default=DEFAULT_SOURCE, help="Источник звука собеседников.")
     parser.add_argument("--sink", default=DEFAULT_SINK, help="Виртуальный выход для речи ассистента.")
     parser.add_argument("--max-seconds", default=20, type=int, metavar="1–30", help="Лимит одной реплики.")
+    parser.add_argument("--meeting-url", help="Базовый URL сервиса встречи.")
+    parser.add_argument("--meeting-id", help="ID сессии, выданный администратором сервиса.")
     args = parser.parse_args()
     if not 1 <= args.max_seconds <= MAX_RECORD_SECONDS:
         parser.error("--max-seconds должен быть от 1 до 30.")
@@ -66,7 +68,13 @@ def main() -> int:
 
         if not sys.stdin.isatty():
             parser.error("Для диалога запустите команду в интерактивном терминале.")
-        names = ("YANDEX_LLM_API_KEY", "YANDEX_FOLDER_ID", "YANDEX_SPEECH_API_KEY")
+        meeting_token = environ.get("IIKUZNEZOV_MEETING_TOKEN", "").strip()
+        remote = bool(args.meeting_url or args.meeting_id)
+        if remote and not (args.meeting_url and args.meeting_id and meeting_token):
+            parser.error("Для сессии нужны --meeting-url, --meeting-id и IIKUZNEZOV_MEETING_TOKEN.")
+        names = ("YANDEX_SPEECH_API_KEY",)
+        if not remote:
+            names += ("YANDEX_LLM_API_KEY", "YANDEX_FOLDER_ID")
         missing = [name for name in names if not environ.get(name, "").strip()]
         if missing:
             parser.error("Задайте переменные окружения " + ", ".join(missing) + ".")
@@ -75,6 +83,7 @@ def main() -> int:
 
         from app.adapters.model import YandexAIStudioModelPort
 
+        from .client import MeetingClient, MeetingClientError
         from .session import run_session
         from .speech import YandexSpeech
 
@@ -84,15 +93,29 @@ def main() -> int:
         with httpx.Client(timeout=20) as client, camera as url:
             if url:
                 print(f"3D-камера для OBS: {url}")
-            model = YandexAIStudioModelPort(
-                environ["YANDEX_LLM_API_KEY"].strip(), environ["YANDEX_FOLDER_ID"].strip(),
-                model=model_name, client=client, max_reply_chars=350,
-            )
+            meeting = None
+            model = None
+            if remote:
+                try:
+                    meeting = MeetingClient(client, args.meeting_url, args.meeting_id, meeting_token)
+                except httpx.InvalidURL:
+                    parser.error("Укажите корректный базовый URL сервиса встречи.")
+                except ValueError as error:
+                    parser.error(str(error))
+            else:
+                model = YandexAIStudioModelPort(
+                    environ["YANDEX_LLM_API_KEY"].strip(), environ["YANDEX_FOLDER_ID"].strip(),
+                    model=model_name, client=client, max_reply_chars=350,
+                )
             speech = YandexSpeech(
                 client, environ["YANDEX_SPEECH_API_KEY"].strip(), voice=CHARACTER_VOICES[args.character],
             )
             print("Войдите в комнату через браузер и включите назначенный виртуальный микрофон.")
-            run_session(audio, speech, model, sys.stdin, args.max_seconds, avatar=avatar)
+            try:
+                run_session(audio, speech, model, sys.stdin, args.max_seconds, avatar=avatar, meeting=meeting)
+            except MeetingClientError as error:
+                print(f"Сессию встречи остановил ответ сервиса ({error}).", file=sys.stderr)
+                return 1
     except (AudioError, CameraError) as error:
         print(error, file=sys.stderr)
         return 1
