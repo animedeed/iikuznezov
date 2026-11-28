@@ -46,18 +46,24 @@ def minutes_intents(candidate: MinutesCandidate) -> list[EffectIntent]:
     ]
 
 
-def revise_minutes(candidate: MinutesCandidate, entry: str) -> MinutesCandidate:
+def revise_minutes(
+    candidate: MinutesCandidate, entry: str, *,
+    assignees: tuple[str, ...] = ASSIGNEES, recipients: tuple[str, ...] = RECIPIENTS,
+) -> MinutesCandidate:
     field, _, value = entry.partition(" ")
     value = value.strip()
     if not value:
         raise ValueError(REVISION_HINT)
     data = candidate.model_dump()
-    task = data["tasks"][0]
+    tasks = data["tasks"]
+    if field in {"task", "assignee", "due"} and not tasks:
+        raise ValueError("В протоколе нет поручений для правки.")
+    task = tasks[0] if tasks else None
     if field == "summary":
         data["summary"] = value
     elif field == "task":
         task["action"] = value
-    elif field == "assignee" and value in ASSIGNEES:
+    elif field == "assignee" and value in assignees:
         task["assignee_ref"] = value
     elif field == "due":
         try:
@@ -67,9 +73,10 @@ def revise_minutes(candidate: MinutesCandidate, entry: str) -> MinutesCandidate:
         if due.isoformat() != value:
             raise ValueError("Укажите срок в формате ГГГГ-ММ-ДД.")
         task["due_date"] = due
-    elif field == "recipient" and value in RECIPIENTS:
+    elif field == "recipient" and value in recipients:
         data["participant_refs"] = (value,)
     else:
         raise ValueError(REVISION_HINT)
-    task["status"] = "draft" if task["assignee_ref"] and task["due_date"] else "needs_clarification"
+    if task is not None and field in {"task", "assignee", "due"}:
+        task["status"] = "draft" if task["assignee_ref"] and task["due_date"] else "needs_clarification"
     return MinutesCandidate.model_validate(data)

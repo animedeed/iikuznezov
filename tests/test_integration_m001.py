@@ -223,7 +223,8 @@ def test_shared_pilot_runs_channels_and_scopes_knowledge(tmp_path, monkeypatch):
     now = datetime.now(UTC)
     receipt = MailReceipt.model_validate({
         "folder": "INBOX", "uidvalidity": 10, "uid": 1, "from": "sender@example.invalid",
-        "subject": "Просьба подтвердить срок поставки", "text": "Нужно согласовать срок.",
+        "subject": "Просьба подтвердить срок поставки",
+        "text": "Нужно согласовать срок. " + "А" * 1000 + " Конец длинного письма.",
         "received_at": now,
     })
     cursors = []
@@ -267,6 +268,7 @@ def test_shared_pilot_runs_channels_and_scopes_knowledge(tmp_path, monkeypatch):
             build_plan=lambda profile_id, day, period: build_plan(
                 profile_id, day, period, store=store, calendar=calendar, tasks=tasks,
             ),
+            week_ends_sunday=True,
         )
         inbox = UpdateInbox(store.path, api, 7)
         worker = PilotWorker(
@@ -280,6 +282,14 @@ def test_shared_pilot_runs_channels_and_scopes_knowledge(tmp_path, monkeypatch):
         worker.tick()
         cards = [(index, entry) for index, entry in enumerate(bot.sent, 1) if entry.get("reply_markup")]
         assert len(cards) == 2
+        mail_card = next(entry["text"] for _, entry in cards if "Согласование письма" in entry["text"])
+        assert "Действие: Переслать" in mail_card
+        assert "От: sender@example.invalid" in mail_card
+        assert "Тема письма: Просьба подтвердить срок поставки" in mail_card
+        assert "Нужно согласовать срок." in mail_card
+        assert "Показано начало письма" in mail_card
+        assert "Конец длинного письма" not in mail_card
+        assert "Черновик отсутствует" not in mail_card
         assert not smtp.sent and not calendar.written and not tasks.list_open("pilot")
         for update_id, (message_id, entry) in enumerate(cards, 1):
             data = entry["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
@@ -291,6 +301,9 @@ def test_shared_pilot_runs_channels_and_scopes_knowledge(tmp_path, monkeypatch):
 
         assert [cursor.uid for cursor in cursors if cursor] == [1, 1]
         assert sorted(x[1][0] for x in smtp.sent) == sorted(recipients.values())
+        forwarded = next(message for message, targets in smtp.sent if targets == [recipients["review"]])
+        assert forwarded.get_content().startswith("Пересылка согласована руководителем в Telegram.")
+        assert "Конец длинного письма." in forwarded.get_content()
         assert len(calendar.written) == 1 and len(tasks.list_open("pilot")) == 1
         assert not tasks.list_open("other")
         with store._connection() as db:
@@ -310,3 +323,40 @@ def test_shared_pilot_runs_channels_and_scopes_knowledge(tmp_path, monkeypatch):
         assert len(model.calls) == 2
         assert "known" in bot.sent[-1]["text"]
         assert "Среда" not in model.calls[-1][1][-1]["content"]
+        for command, expected in (
+            ("/help", "/ask Какие сроки мы согласовали?"),
+            ("/week 2026-12-09", "09.12.2026–13.12.2026"),
+        ):
+            worker.handle_update({
+                "message": {"text": command, "chat": {"type": "private", "id": 42}, "from": {"id": 42}},
+            })
+            assert expected in bot.sent[-1]["text"]
+
+        edit_token = sessions.provision(
+            "pilot", "pilot-meeting-edit", 42, participant_refs=("participant",), allowed_assignee_refs=("sales",),
+        )
+        sessions.start("pilot-meeting-edit", edit_token, "start")
+        sessions.turn(
+            "pilot-meeting-edit", edit_token, TurnRequest(request_id="turn", sequence=1, text="Подготовить отчёт."),
+        )
+        sessions.finish("pilot-meeting-edit", edit_token, "finish")
+        model.answer = MinutesDraft.model_validate({
+            "summary": "Итог для правки.",
+            "tasks": [{"action": "Подготовить отчёт", "assignee_ref": "sales", "due_date": due_date.isoformat(),
+                       "source_turn_ids": ["turn"]}],
+        })
+        worker.tick()
+        card_message_id = len(bot.sent)
+        revise_button = bot.sent[-1]["reply_markup"]["inline_keyboard"][0][2]["callback_data"]
+        worker.handle_update(callback(20, revise_button, chat=42, message=card_message_id))
+        prompt = bot.sent[-1]["text"]
+        assert "assignee sales" in prompt
+        assert "recipient participant" in prompt
+        assert "/remember " in prompt
+        worker.handle_update({
+            "message": {
+                "text": f"/revise {revise_button.split(':')[1]} assignee sales",
+                "chat": {"type": "private", "id": 42}, "from": {"id": 42},
+            },
+        })
+        assert "Правка сохранена" in bot.sent[-1]["text"]

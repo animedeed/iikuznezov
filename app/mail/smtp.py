@@ -89,6 +89,16 @@ class SmtpEmailTransport:
         address = self.settings.recipients.get(effect.target_ref)
         return valid_address(address) if address else None
 
+    def _was_approved(self, effect: Effect) -> bool:
+        if self.store is None or effect.document_id is None:
+            return False
+        with self.store._connection() as db:
+            return db.execute(
+                """SELECT 1 FROM approvals WHERE profile_id = ? AND document_id = ? AND version = ?
+                   AND state = 'approved' AND decision = 'approve'""",
+                (effect.profile_id, effect.document_id, effect.version),
+            ).fetchone() is not None
+
     def build_message(self, effect: Effect, recipient: str) -> EmailMessage | EffectResult:
         payload = effect.payload
         if "minutes" in payload and isinstance(payload["minutes"], dict):
@@ -110,10 +120,16 @@ class SmtpEmailTransport:
                 if original is None:
                     return _result(DeliveryStatus.FAILED, "source_not_found")
                 subject = "Fwd: " + _one_line(original.subject)
-                body = (note + "\n\n" if note else "") + (
+                parts = []
+                if self._was_approved(effect):
+                    parts.append("Пересылка согласована руководителем в Telegram.")
+                if note:
+                    parts.append(note)
+                parts.append(
                     f"---------- Пересылаемое письмо ----------\nОт: {_one_line(original.sender, 320)}\n"
                     f"Тема: {_one_line(original.subject)}\n\n{original.text}"
                 )
+                body = "\n\n".join(parts)
         message = EmailMessage()
         message["From"] = self.settings.username
         message["To"] = recipient

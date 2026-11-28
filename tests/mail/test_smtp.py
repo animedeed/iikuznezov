@@ -89,6 +89,7 @@ def test_forward_includes_original_mail(tmp_path):
     message = FakeSmtp.instances[0].sent[0][0]
     assert message["Subject"] == "Fwd: Запрос КП"
     assert "Пришлите КП на десять единиц." in message.get_content()
+    assert "Пересылка согласована" not in message.get_content()
     missing = transport(store).send_email(effect(payload={"action": "forward", "source_id": "nope"}, effect_id="e2"))
     assert (missing.status, missing.error_code) == (DeliveryStatus.FAILED, "source_not_found")
 

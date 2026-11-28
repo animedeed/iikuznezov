@@ -11,6 +11,7 @@ from app.contracts import (
     Effect,
     EffectKind,
     EffectResult,
+    MailReceipt,
     TelegramActor,
 )
 from app.core.approvals import ApprovalService
@@ -69,13 +70,13 @@ _BUTTONS = {
 _DECISIONS = {code: decision for decision, (code, _) in _BUTTONS.items()}
 _STATUS_TEXT = {
     DecisionStatus.ALREADY_DECIDED: "Решение уже сохранено.",
-    DecisionStatus.STALE: "Карточка устарела.",
+    DecisionStatus.STALE: "Карточка устарела. Найдите в чате карточку с более новой версией.",
     DecisionStatus.FORBIDDEN: "У вас нет доступа к этому согласованию.",
-    DecisionStatus.VALIDATION_ERROR: "Не удалось принять решение.",
+    DecisionStatus.VALIDATION_ERROR: "Не удалось сохранить решение. Откройте последнюю карточку и повторите.",
 }
 _ACCEPTED_TEXT = {
     Decision.APPROVE: "Утверждено. Результат доставки будет отдельно.",
-    Decision.REJECT: "Отклонено.",
+    Decision.REJECT: "Отклонено. Действия по этой версии отменены.",
     Decision.REVISE: "Отправлено на правку.",
 }
 
@@ -96,7 +97,9 @@ def _pages(message: str, limit: int = 3500) -> list[str]:
     return pages
 
 
-def render_card(card: ApprovalCardView) -> tuple[list[str], dict[str, Any]]:
+def render_card(
+    card: ApprovalCardView, original_mail: MailReceipt | None = None,
+) -> tuple[list[str], dict[str, Any]]:
     document = card.document
     candidate = document.candidate
     if candidate.kind == "mail_action":
@@ -106,13 +109,27 @@ def render_card(card: ApprovalCardView) -> tuple[list[str], dict[str, Any]]:
             f"Действие: {action[dispatch.action]}\nАдресат: {dispatch.target_ref}"
             if dispatch else "Адресат требует уточнения."
         )
-        message = (
-            f"Согласование письма · версия {document.version}\n{destination}\n"
-            f"Тема запроса: {candidate.topic}\nОснование: {candidate.rationale}\n\n"
-            f"{candidate.draft_text or 'Черновик отсутствует.'}"
-        )
+        sections = [
+            f"Согласование письма · версия {document.version}\n{destination}",
+            f"Основание: {candidate.rationale}",
+        ]
+        if original_mail is not None:
+            body = original_mail.text.strip()
+            preview = f"{body[:900].rstrip()}…\n[Показано начало письма.]" if len(body) > 900 else body
+            subject = original_mail.subject.strip() or "(без темы)"
+            sections.append(
+                f"От: {original_mail.sender}\nТема письма: {subject}\n\n"
+                f"{preview or '(текст письма отсутствует)'}"
+            )
+        else:
+            sections.append(f"Тема запроса: {candidate.topic}\nОригинал письма недоступен.")
+        if candidate.draft_text:
+            label = "Комментарий к пересылке" if dispatch and dispatch.action == "forward" else "Черновик"
+            sections.append(f"{label}\n{candidate.draft_text}")
+        message = "\n\n".join(sections)
     else:
         decisions = "\n".join(f"• {item.text}" for item in candidate.decisions)
+        questions = "\n".join(f"• {item.text}" for item in candidate.open_questions)
         tasks = "\n".join(
             f"• {task.action} — {task.assignee_ref or 'исполнитель не указан'}, "
             f"{task.due_date or 'срок не указан'}"
@@ -121,7 +138,9 @@ def render_card(card: ApprovalCardView) -> tuple[list[str], dict[str, Any]]:
         message = (
             f"{candidate.title} · версия {document.version}\n"
             f"Адресаты: {', '.join(candidate.participant_refs) or 'не указаны'}\n\n{candidate.summary}\n\n"
-            f"Решения\n{decisions or 'Нет решений'}\n\nПоручения\n{tasks or 'Нет поручений'}"
+            f"Решения\n{decisions or 'Нет решений'}\n\n"
+            f"Открытые вопросы\n{questions or 'Нет открытых вопросов'}\n\n"
+            f"Поручения\n{tasks or 'Нет поручений'}"
         )
     buttons = []
     for decision in card.request.actions:
@@ -180,7 +199,10 @@ class ApprovalNoticeTransport:
         chat_id = self.chat_for(effect.profile_id, actor)
         if chat_id is None:
             return EffectResult(status=DeliveryStatus.FAILED, error_code="chat_unbound")
-        pages, markup = render_card(card)
+        original_mail = None
+        if card.document.candidate.kind == "mail_action":
+            original_mail = self.approvals.store.get_mail(card.document.profile_id, card.document.source_id)
+        pages, markup = render_card(card, original_mail)
         result = deliver_pages(self.api, chat_id, pages, markup=markup)
         if result.status == DeliveryStatus.SENT and self.record_card is not None:
             self.record_card(effect.target_ref, effect.profile_id, actor, chat_id, int(result.external_id))

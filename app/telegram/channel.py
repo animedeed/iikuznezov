@@ -20,6 +20,7 @@ class TelegramChannel:
         chat_for: Callable[[str, TelegramActor], int | None],
         profiles_for: Callable[[int], Mapping[str, str]],
         build_plan: Callable[[str, date, Period], Plan],
+        week_ends_sunday: bool = False,
     ):
         self.approvals = approvals
         self.api = api
@@ -35,7 +36,9 @@ class TelegramChannel:
             )""")
         self.notices = ApprovalNoticeTransport(api, approvals, chat_for, self._record_card)
         self.delivery_updates = DeliveryUpdates(approvals, api, chat_for)
-        self.plans = PlanCommands(api, profiles_for, build_plan, bot_username=bot_username)
+        self.plans = PlanCommands(
+            api, profiles_for, build_plan, bot_username=bot_username, week_ends_sunday=week_ends_sunday,
+        )
 
     def _record_card(
         self, approval_id: str, profile_id: str, approver: TelegramActor, chat_id: int, message_id: int,

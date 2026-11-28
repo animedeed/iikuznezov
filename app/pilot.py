@@ -135,6 +135,7 @@ def _run(config, settings, mail, fingerprints, api, bot, client, calendar_url, c
     channel = TelegramChannel(
         approvals, api, bot_id=bot["id"], bot_username=bot["username"],
         context_db=store.path, chat_for=chat_for, profiles_for=profiles_for, build_plan=load_plan,
+        week_ends_sunday=True,
     )
     inbox = UpdateInbox(store.path, api, bot["id"])
     model = YandexAIStudioModelPort(

@@ -62,6 +62,11 @@ class DeliveryUpdates:
                 lines.append(
                     f"• {_KINDS[operation['kind']]} ({operation['target_ref']}) — {_STATES[operation['status']]}"
                 )
+            states = {operation["status"] for operation in operations}
+            if "retryable" in states:
+                lines.append("\nБот повторит временно неудавшиеся действия автоматически.")
+            if states & {"unknown", "failed"}:
+                lines.append("\nПередайте этот результат администратору. Повторно утверждать карточку не нужно.")
             db.execute(
                 """UPDATE effects SET status = 'cancelled'
                    WHERE profile_id = ? AND document_id = ? AND version = ?

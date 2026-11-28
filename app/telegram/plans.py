@@ -13,11 +13,11 @@ Period = Literal["day", "week"]
 _PERIODS: dict[str, Period] = {"/plan": "day", "/week": "week"}
 
 
-def render_plan(plan: Plan) -> str:
+def render_plan(plan: Plan, *, week_ends_sunday: bool = False) -> str:
     zone = ZoneInfo(plan.timezone)
     heading = f"План на день · {plan.date:%d.%m.%Y}"
     if plan.period == "week":
-        end = plan.date + timedelta(days=6)
+        end = plan.date + timedelta(days=6 - plan.date.weekday() if week_ends_sunday else 6)
         heading = f"План на неделю · {plan.date:%d.%m.%Y}–{end:%d.%m.%Y}"
     meetings = []
     for meeting in plan.meetings:
@@ -32,12 +32,13 @@ def render_plan(plan: Plan) -> str:
         ("Просроченные поручения", [f"{t.due_date:%d.%m} — {t.title}" for t in plan.overdue]),
         (f"Итоги рабочего дня {plan.previous_workday:%d.%m}", plan.previous_workday_results),
         ("Статусы писем", plan.mail_statuses),
-        ("Ожидают согласования", plan.pending_approvals),
     )
     text = [f"{heading}\nЧасовой пояс: {plan.timezone}"]
     for title, values in sections:
-        entries = "\n".join(f"• {value}" for value in values) or "—"
+        entries = "\n".join(f"• {value}" for value in values) or "Нет записей"
         text.append(f"{title}\n{entries}")
+    if plan.pending_approvals:
+        text.append(f"Ждут вашего решения: {len(plan.pending_approvals)}\nОткройте карточки согласования в чате.")
     return "\n\n".join(text)
 
 
@@ -45,11 +46,13 @@ class PlanCommands:
     def __init__(
         self, api: TelegramAPI, profiles_for: Callable[[int], Mapping[str, str]],
         load_plan: Callable[[str, date, Period], Plan], *, bot_username: str,
+        week_ends_sunday: bool = False,
     ):
         self.api = api
         self.profiles_for = profiles_for
         self.load_plan = load_plan
         self.bot_username = bot_username.casefold()
+        self.week_ends_sunday = week_ends_sunday
 
     def handle(self, update: dict) -> bool:
         message = update.get("message")
@@ -103,7 +106,7 @@ class PlanCommands:
         try:
             plan = self.load_plan(profile_id, when, period)
         except LookupError:
-            return "План для этой даты пока недоступен."
+            return "План для этой даты пока недоступен. Повторите запрос позже."
         if (plan.profile_id, plan.date, plan.period) != (profile_id, when, period):
-            return "Сервис вернул план для другого запроса."
-        return render_plan(plan)
+            return "Не удалось получить план для выбранной даты и профиля. Повторите запрос позже."
+        return render_plan(plan, week_ends_sunday=self.week_ends_sunday)

@@ -24,6 +24,14 @@ from app.workflow.transport import WorkflowTransport
 
 logger = getLogger(__name__)
 
+_HELP_TEXT = (
+    "Я помогаю согласовывать письма и протоколы. Когда потребуется решение, пришлю карточку с кнопками.\n\n"
+    "План дня: /plan 2026-12-07\n"
+    "План недели: /week 2026-12-07\n"
+    "Вопрос по базе знаний: /ask Какие сроки мы согласовали?\n\n"
+    "В планах замените дату на нужную. Для правки нажмите «На правку»: я пришлю команду с примером."
+)
+
 
 class PilotWorker:
     def __init__(
@@ -97,7 +105,7 @@ class PilotWorker:
         if isinstance(text, str) and text.strip():
             args = text.split(maxsplit=1)
             command, _, username = args[0].partition("@")
-            if command in {"/ask", "/revise", "/remember"} and (
+            if command in {"/start", "/help", "/ask", "/revise", "/remember"} and (
                 not username or username.casefold() == self.bot_username
             ):
                 self._handle_private_command(message, command, args[1] if len(args) == 2 else "")
@@ -113,18 +121,23 @@ class PilotWorker:
         if type(user_id) is not int or user_id <= 0 or chat.get("id") != user_id or chat.get("type") != "private":
             return
         actor = TelegramActor(telegram_user_id=user_id)
-        if command == "/ask":
+        if command in {"/start", "/help"}:
+            reply = _HELP_TEXT
+        elif command == "/ask":
             if not self.telegram.plans.profiles_for(user_id).get(self.profile_id):
-                return
-            reply = self._answer(argument)
+                reply = "У вас нет доступа к базе знаний. Если он нужен, обратитесь к администратору профиля."
+            else:
+                reply = self._answer(argument)
         elif command == "/revise":
             reply = self._revise(actor, argument)
         else:
             document_id, _, preference = argument.partition(" ")
             try:
                 self.telegram.approvals.save_preference(self.profile_id, actor, preference, document_id)
-            except (LookupError, ValueError, PermissionError):
-                reply = "Укажите доступный документ и текст правила. Пример: /remember ID текст."
+            except PermissionError:
+                reply = "Сохранять правила может только руководитель профиля."
+            except (LookupError, ValueError):
+                reply = "Скопируйте команду /remember из сообщения после «На правку» и подставьте текст правила."
             else:
                 reply = "Правило сохранено для этого профиля."
         for page in _pages(reply):
@@ -147,14 +160,35 @@ class PilotWorker:
         decision = self.telegram.approvals.get_decision(self.profile_id, approval_id, actor)
         if decision is None or decision.decision != Decision.REVISE:
             return None
-        return f"Отправьте /revise {approval_id} и новый текст. Для протокола используйте поле=значение."
+        document = self.store.get_version(self.profile_id, decision.document_id, decision.version)
+        if document is None:
+            return None
+        command = f"/revise {approval_id}"
+        if isinstance(document.candidate, MailCandidate):
+            instructions = f"{command} Новый текст письма"
+            if document.mail_dispatch and document.mail_dispatch.action == "forward":
+                instructions = f"{command} Комментарий к пересылаемому письму"
+        else:
+            source, _ = load_meeting_source(self.store, self.profile_id, document.source_id)
+            examples = [f"{command} summary Новый итог встречи"]
+            if document.candidate.tasks:
+                examples += [f"{command} task Новый текст поручения", f"{command} due 2026-12-08"]
+                if source.allowed_assignee_refs:
+                    examples.append(f"{command} assignee {source.allowed_assignee_refs[0]}")
+            if source.participant_refs:
+                examples.append(f"{command} recipient {source.participant_refs[0]}")
+            instructions = "\n".join(examples)
+        prompt = f"Отправьте одну команду в личном чате со мной. После правки я пришлю новую карточку.\n\n{instructions}"
+        if self.telegram.plans.profiles_for(actor.telegram_user_id).get(self.profile_id):
+            prompt += f"\n\nЧтобы сохранить постоянное правило профиля:\n/remember {document.document_id} Текст правила"
+        return prompt
 
     def _revise(self, actor: TelegramActor, argument: str) -> str:
         approval_id, _, text = argument.partition(" ")
         approvals = self.telegram.approvals
         decision = approvals.get_decision(self.profile_id, approval_id, actor)
         if decision is None or decision.decision != Decision.REVISE or not text.strip():
-            return "Укажите ID согласования с решением «На правку» и новый текст."
+            return "Нажмите «На правку» на актуальной карточке и скопируйте команду из моего сообщения."
         document = self.store.get_version(self.profile_id, decision.document_id, decision.version)
         if document is None:
             return "Версия недоступна."
@@ -167,13 +201,15 @@ class PilotWorker:
                     kind=EffectKind.EMAIL, target_ref=ref, recipient_fingerprint=fingerprint,
                 ),) if fingerprint else ()
             else:
-                candidate = revise_minutes(document.candidate, text)
                 source, _ = load_meeting_source(self.store, self.profile_id, document.source_id)
+                candidate = revise_minutes(
+                    document.candidate, text, assignees=source.allowed_assignee_refs, recipients=source.participant_refs,
+                )
                 intents = minutes_intents(candidate, source, recipient_fingerprints=self.fingerprints)
             approvals.revise_document(
                 self.profile_id, document.document_id, actor, decision.version, candidate,
                 mail_dispatch=document.mail_dispatch, intents=intents,
             )
         except (LookupError, ValueError, PermissionError):
-            return "Правка не сохранена. Проверьте формат или откройте актуальную карточку."
+            return "Правка не сохранена. Проверьте команду по примеру в чате и версию карточки."
         return "Правка сохранена. Бот пришлёт карточку новой версии."
