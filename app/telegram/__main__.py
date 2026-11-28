@@ -3,12 +3,11 @@
 from argparse import ArgumentParser
 from contextlib import closing
 from datetime import UTC, datetime
-from json import dumps, loads
 from os import environ
 from pathlib import Path
 from re import fullmatch
 from sqlite3 import Connection, connect
-from time import sleep, time
+from time import time
 
 import httpx
 from pydantic import ValidationError
@@ -20,13 +19,13 @@ from app.contracts import (
 from app.core.approvals import ApprovalService, EffectIntent
 from app.core.effects import EffectQueue
 from app.core.store import Store
-from app.telegram.bot import ApprovalNoticeTransport, TelegramAPI, TelegramError, handle_update
+from app.telegram.bot import ApprovalNoticeTransport, TelegramAPI, TelegramError
 from app.telegram.channel import TelegramChannel
 from app.telegram.delivery_updates import DeliveryUpdates
 from app.telegram.demo_minutes import REVISION_HINT, minutes_intents, prepare_minutes, revise_minutes
 from app.telegram.demo_plans import build_demo_plan
+from app.telegram.inbox import UpdateInbox
 from app.telegram.morning import MorningPlans
-from app.telegram.plans import PlanCommands
 
 
 def seed_profile(store: Store, user_id: int):
@@ -187,59 +186,24 @@ class DemoRevision:
 
 
 def poll(
-    api: TelegramAPI, approvals: ApprovalService, queue: EffectQueue, transport: DemoTransport,
-    inbox: Path, document_id: str, plans: PlanCommands, morning: MorningPlans | None,
-    channel: TelegramChannel | None = None,
+    channel: TelegramChannel, queue: EffectQueue, transport: DemoTransport,
+    inbox: UpdateInbox, document_id: str, morning: MorningPlans | None,
 ):
-    with closing(connect(inbox)) as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS updates
-            (id INTEGER PRIMARY KEY, body TEXT, state TEXT NOT NULL DEFAULT 'pending')""")
-        revision = DemoRevision(db, approvals, document_id)
+    with closing(connect(inbox.path)) as db:
+        revision = DemoRevision(db, channel.approvals, document_id)
+
+        def handle(update):
+            if not revision.handle(channel.api, update):
+                channel.handle_update(update, on_revision=revision.open)
+
         while True:
             if morning is not None:
                 morning.tick(datetime.now(UTC))
             while queue.run_once(transport) is not None:
                 pass
-            if transport.updates is not None and transport.updates.enqueue_latest("telegram-demo", document_id):
+            if channel.delivery_updates.enqueue_latest("telegram-demo", document_id):
                 continue
-            cursor = db.execute("SELECT MAX(id) FROM updates").fetchone()[0]
-            pending = db.execute("SELECT id, body FROM updates WHERE state = 'pending' ORDER BY id").fetchall()
-            if not pending:
-                try:
-                    updates = api.updates(cursor + 1 if cursor is not None else None)
-                except TelegramError as error:
-                    if error.code in (401, 404, 409):
-                        raise
-                    sleep(max(2, error.retry_after))
-                    continue
-                with db:
-                    db.executemany(
-                        "INSERT OR IGNORE INTO updates (id, body) VALUES (?, ?)",
-                        [(update["update_id"], dumps(update)) for update in updates
-                         if isinstance(update, dict) and type(update.get("update_id")) is int],
-                    )
-                continue
-            for update_id, body in pending:
-                state = "done"
-                delay = 0
-                try:
-                    update = loads(body)
-                    if not revision.handle(api, update):
-                        if channel is not None:
-                            channel.handle_update(update, on_revision=revision.open)
-                        elif not plans.handle(update):
-                            handle_update(api, approvals, update, on_revision=revision.open)
-                except TelegramError as error:
-                    state = "failed"
-                    delay = error.retry_after
-                    print(f"Событие {update_id}: {error}", flush=True)
-                except (KeyError, TypeError, ValueError):
-                    state = "failed"
-                    print(f"Некорректное событие {update_id}", flush=True)
-                with db:
-                    db.execute("UPDATE updates SET state = ?, body = NULL WHERE id = ?", (state, update_id))
-                if delay:
-                    sleep(delay)
+            inbox.poll_once(handle)
 
 
 def main():
@@ -327,26 +291,15 @@ def main():
             def profiles_for(user_id):
                 return {"telegram-demo": "Тестовый профиль"} if user_id == args.user_id else {}
 
-            channel = None
-            if args.run_id:
-                channel = TelegramChannel(
-                    approvals, api, bot_id=bot["id"], bot_username=bot["username"],
-                    context_db=folder / "telegram-context.sqlite3", chat_for=chat_for,
-                    profiles_for=profiles_for, build_plan=build_demo_plan,
-                )
-                transport = DemoTransport(channel.notices, channel.delivery_updates)
-                plans = channel.plans
-            else:
-                transport = DemoTransport(
-                    ApprovalNoticeTransport(api, approvals, chat_for),
-                    DeliveryUpdates(approvals, api, chat_for),
-                )
-                plans = PlanCommands(api, profiles_for, build_demo_plan, bot_username=bot["username"])
-            print(f"Тестовый опрос @{bot['username']}. База: {store.path}", flush=True)
-            poll(
-                api, approvals, EffectQueue(store), transport, folder / "inbox.sqlite3",
-                document.document_id, plans, morning, channel,
+            channel = TelegramChannel(
+                approvals, api, bot_id=bot["id"], bot_username=bot["username"],
+                context_db=folder / "telegram-context.sqlite3", chat_for=chat_for,
+                profiles_for=profiles_for, build_plan=build_demo_plan,
             )
+            inbox = UpdateInbox(folder / "inbox.sqlite3", api, bot["id"], import_legacy=True)
+            transport = DemoTransport(channel.notices, channel.delivery_updates)
+            print(f"Тестовый опрос @{bot['username']}. База: {store.path}", flush=True)
+            poll(channel, EffectQueue(store), transport, inbox, document.document_id, morning)
     except TelegramError as error:
         if error.code == 409:
             parser.exit(1, "Telegram уже обслуживается другим опросом или webhook.\n")
