@@ -32,6 +32,7 @@ def process_mail(
     *,
     sales_alias: str | None,
     trusted_quote: bool = False,
+    recipient_fingerprint: str | None = None,
 ) -> MailIntakeResult:
     """Persist a classified mail action; only exact quote requests can auto-forward.
 
@@ -67,10 +68,12 @@ def process_mail(
     )
     if automatic:
         return _auto_forward(store, profile_id, received.event_id, candidate,
-                             sales_alias, received.duplicate, channel_id)
+                             sales_alias, received.duplicate, channel_id, recipient_fingerprint)
 
     dispatch = MailDispatch(action="forward", target_ref=sales_alias) if sales_alias else None
-    intents = (EffectIntent(kind=EffectKind.EMAIL, target_ref=sales_alias),) if sales_alias else ()
+    intents = (EffectIntent(
+        kind=EffectKind.EMAIL, target_ref=sales_alias, recipient_fingerprint=recipient_fingerprint,
+    ),) if sales_alias else ()
     card = ApprovalService(store).propose(
         profile_id, received.event_id, candidate, mail_dispatch=dispatch, intents=intents,
         mail_channel_id=channel_id,
@@ -90,7 +93,7 @@ def process_mail(
 
 def _auto_forward(
     store: Store, profile_id: str, event_id: str, candidate: MailCandidate,
-    sales_alias: str, duplicate: bool, channel_id: str,
+    sales_alias: str, duplicate: bool, channel_id: str, recipient_fingerprint: str | None,
 ) -> MailIntakeResult:
     dispatch = MailDispatch(action="forward", target_ref=sales_alias)
     stable_key = dumps(["mail-auto-forward", profile_id, event_id, sales_alias], separators=(",", ":"))
@@ -124,7 +127,8 @@ def _auto_forward(
             version=version.version, kind=EffectKind.EMAIL, key=stable_key,
             target_ref=sales_alias,
             payload={"action": "forward", "source_id": event_id,
-                     "draft_text": candidate.draft_text},
+                     "draft_text": candidate.draft_text,
+                     **({"recipient_fingerprint": recipient_fingerprint} if recipient_fingerprint else {})},
         )
         enqueue_effect(db, effect)
         db.execute(

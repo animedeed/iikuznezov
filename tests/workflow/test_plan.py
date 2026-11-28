@@ -115,3 +115,19 @@ def test_send_due_plans_respects_local_time_and_workdays(store):
     assert send_due_plans(datetime(2026, 12, 7, 5, 30, tzinfo=UTC), **kw) == ["p1", "p2"]
     assert send_due_plans(datetime(2026, 12, 7, 9, 0, tzinfo=UTC), **kw) == []         # already queued
     assert send_due_plans(datetime(2026, 12, 12, 9, 0, tzinfo=UTC), **kw) == []        # Saturday
+
+
+def test_due_plan_skips_unselected_profiles_and_does_not_reread_delivered_calendar(store):
+    class CountingCalendar(FakeCalendar):
+        reads = []
+
+        def list_events(self, profile_id, start, end):
+            self.reads.append(profile_id)
+            return super().list_events(profile_id, start, end)
+
+    calendar = CountingCalendar()
+    now = datetime(2026, 12, 7, 5, 30, tzinfo=UTC)
+    kwargs = dict(store=store, calendar=calendar, tasks=Tasks(), profile_ids=("p1",))
+    assert send_due_plans(now, **kwargs) == ["p1"]
+    assert send_due_plans(now, **kwargs) == []
+    assert calendar.reads == ["p1"]

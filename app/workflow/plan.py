@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
@@ -22,8 +22,8 @@ _KIND_LABELS = {
 
 
 def previous_workday(day: date, workdays: Collection[int] = MON_FRI) -> date:
-    if not workdays:
-        raise ValueError("workdays must not be empty")
+    if not workdays or not set(workdays).issubset(range(7)):
+        raise ValueError("workdays must be a non-empty collection of weekdays (0–6)")
     probe = day - timedelta(days=1)
     while probe.weekday() not in workdays:
         probe -= timedelta(days=1)
@@ -100,7 +100,7 @@ def _previous_results(db, profile_id: str, start: datetime, end: datetime) -> tu
 def _mail_statuses(db, profile_id: str) -> tuple[str, ...]:
     lines = []
     waiting = db.execute(
-        "SELECT count(*) FROM inbox_events WHERE profile_id = ? AND source = 'mail' AND status <> 'processed'",
+        "SELECT count(*) FROM inbox_events WHERE profile_id = ? AND source = 'mail' AND status = 'received'",
         (profile_id,)).fetchone()[0]
     if waiting:
         lines.append(f"Писем ожидают обработки: {waiting}")
@@ -161,7 +161,7 @@ def schedule_plan_message(store: Store, plan: Plan) -> bool:
             (plan.profile_id,)).fetchall()
         if len(leaders) != 1:
             raise LookupError("Profile needs exactly one active Telegram binding")
-        key = f"plan:{plan.profile_id}:{plan.date.isoformat()}:{plan.period}"
+        key = _plan_key(plan.profile_id, plan.date, plan.period)
         if db.execute("SELECT 1 FROM effects WHERE profile_id = ? AND key = ?",
                       (plan.profile_id, key)).fetchone() is not None:
             return False  # enqueue_effect would silently accept an exact retry, so check first
@@ -177,20 +177,38 @@ def schedule_plan_message(store: Store, plan: Plan) -> bool:
         return True
 
 
+def _plan_key(profile_id: str, day: date, period: str) -> str:
+    return f"plan:{profile_id}:{day.isoformat()}:{period}"
+
+
 def send_due_plans(
     now: datetime, *, store: Store, calendar: CalendarPort, tasks: TaskSource,
     at: time = time(8, 30), workdays: Collection[int] = MON_FRI,
+    profile_ids: Iterable[str] | None = None,
 ) -> list[str]:
     """For each profile whose local time has passed `at` on a workday, queue today's plan.
     Only the current local day is considered, so a late start never sends a stale plan."""
+    if now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    selected = None if profile_ids is None else set(profile_ids)
     with store._connection() as db:
-        profiles = [r["profile_id"] for r in db.execute("SELECT profile_id FROM profiles ORDER BY profile_id")]
+        profiles = db.execute(
+            """SELECT profile_id, timezone FROM profiles JOIN bindings USING (profile_id)
+            WHERE kind = 'telegram' AND active = 1
+            GROUP BY profile_id, timezone HAVING count(*) = 1 ORDER BY profile_id""",
+        ).fetchall()
     queued = []
-    for profile_id in profiles:
-        profile = store.get_profile(profile_id)
-        local = now.astimezone(ZoneInfo(profile.timezone))
+    for profile in profiles:
+        profile_id = profile["profile_id"]
+        if selected is not None and profile_id not in selected:
+            continue
+        local = now.astimezone(ZoneInfo(profile["timezone"]))
         if local.weekday() not in workdays or local.time() < at:
             continue
+        with store._connection() as db:
+            if db.execute("SELECT 1 FROM effects WHERE profile_id = ? AND key = ?",
+                          (profile_id, _plan_key(profile_id, local.date(), "day"))).fetchone():
+                continue
         plan = build_plan(profile_id, local.date(), "day", store=store, calendar=calendar,
                           tasks=tasks, workdays=workdays)
         if schedule_plan_message(store, plan):

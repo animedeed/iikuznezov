@@ -191,3 +191,122 @@ def test_group_preflight_checks_bot_write_permission(permission):
         else:
             with pytest.raises(ValueError, match="allowed to send"):
                 check_test_chat(api, bot_id=7, user_id=42, chat_id=-99)
+
+
+def test_shared_pilot_runs_channels_and_scopes_knowledge(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from app.calendar.fake import FakeCalendar
+    from app.contracts import MailReceipt, Profile, Route
+    from app.core.approvals import ApprovalService
+    from app.core.mail_polling import MailPolling
+    from app.core.meeting_sessions import MeetingSessions, TurnRequest
+    from app.core.pilot import PilotWorker
+    from app.knowledge import GroundedAnswer, KnowledgeBase
+    from app.mail.imap import ImapSettings, MailCursor, PollResult
+    from app.mail.routing import MailRoutingContext
+    from app.mail.smtp import SmtpEmailTransport, recipient_fingerprint
+    from app.telegram.channel import TelegramChannel
+    from app.telegram.inbox import UpdateInbox
+    from app.testing import FakeModel
+    from app.workflow.minutes import MinutesDraft
+    from app.workflow.plan import build_plan, schedule_plan_message
+    from app.workflow.tasks import SqliteTaskStore
+    from app.workflow.transport import WorkflowTransport
+
+    store = Store(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    profile = Profile(profile_id="pilot", timezone="Europe/Moscow", quote_route=Route.REVIEW)
+    other = profile.model_copy(update={"profile_id": "other"})
+    store.seed_profiles(((profile, "mail-pilot", 42), (other, "mail-other", 99)))
+    approvals = ApprovalService(store)
+    now = datetime.now(UTC)
+    receipt = MailReceipt.model_validate({
+        "folder": "INBOX", "uidvalidity": 10, "uid": 1, "from": "sender@example.invalid",
+        "subject": "Просьба подтвердить срок поставки", "text": "Нужно согласовать срок.",
+        "received_at": now,
+    })
+    cursors = []
+
+    def fake_poll(settings, persist, *, cursor):
+        cursors.append(cursor)
+        return PollResult(MailCursor(10, 1), (persist(settings.channel_id, receipt),))
+
+    monkeypatch.setattr("app.core.mail_polling.poll_once", fake_poll)
+    recipients = {"review": "review@example.invalid", "participant": "participant@example.invalid"}
+    pins = {ref: recipient_fingerprint(address) for ref, address in recipients.items()}
+    mail = MailPolling(
+        store, ImapSettings("mail-pilot", "sender@example.invalid", "fixture-password"),
+        MailRoutingContext(profile, targets={Route.REVIEW: "review"}),
+        recipient_fingerprints=pins, model=None,
+    )
+    sessions = MeetingSessions(store, approvals)
+    meeting_token = sessions.provision(
+        "pilot", "pilot-meeting", 42, participant_refs=("participant",), allowed_assignee_refs=("sales",),
+    )
+    sessions.start("pilot-meeting", meeting_token, "start")
+    sessions.turn("pilot-meeting", meeting_token, TurnRequest(request_id="turn", sequence=1, text="Подготовить отчёт."))
+    sessions.finish("pilot-meeting", meeting_token, "finish")
+    due_date = now.date() + timedelta(days=2)
+    model = FakeModel(answer=MinutesDraft.model_validate({
+        "summary": "Учебный итог.",
+        "tasks": [{"action": "Подготовить отчёт", "assignee_ref": "sales", "due_date": due_date.isoformat(),
+                   "source_turn_ids": ["turn"]}],
+    }))
+
+    bot, smtp = Bot(), SMTP()
+    calendar, tasks = FakeCalendar(), SqliteTaskStore(store)
+    isolated_plan = build_plan("other", now.date(), store=store, calendar=calendar, tasks=tasks)
+    assert schedule_plan_message(store, isolated_plan)
+    with httpx.Client(transport=httpx.MockTransport(bot.respond)) as client:
+        api = TelegramAPI("fixture-token", client)
+        channel = TelegramChannel(
+            approvals, api, bot_id=7, bot_username="fixturebot", context_db=store.path,
+            chat_for=lambda profile_id, actor: 42 if profile_id == "pilot" and actor.telegram_user_id == 42 else None,
+            profiles_for=lambda user_id: {"pilot": "Pilot"} if user_id == 42 else {},
+            build_plan=lambda profile_id, day, period: build_plan(
+                profile_id, day, period, store=store, calendar=calendar, tasks=tasks,
+            ),
+        )
+        inbox = UpdateInbox(store.path, api, 7)
+        worker = PilotWorker(
+            store, "pilot", channel, WorkflowTransport(calendar, tasks),
+            smtp=SmtpEmailTransport(
+                SmtpSettings(username="sender@example.invalid", password="fixture-password", recipients=recipients),
+                store=store, smtp_factory=smtp, require_recipient_fingerprint=True,
+            ),
+            mail=mail, model=model, recipient_fingerprints=pins, bot_username="fixturebot",
+        )
+        worker.tick()
+        cards = [(index, entry) for index, entry in enumerate(bot.sent, 1) if entry.get("reply_markup")]
+        assert len(cards) == 2
+        assert not smtp.sent and not calendar.written and not tasks.list_open("pilot")
+        for update_id, (message_id, entry) in enumerate(cards, 1):
+            data = entry["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+            bot.updates.append(callback(update_id, data, chat=42, message=message_id))
+        inbox.poll_once(worker.handle_update)
+        inbox.poll_once(worker.handle_update)
+        worker.tick()
+        worker.tick()
+
+        assert [cursor.uid for cursor in cursors if cursor] == [1, 1]
+        assert sorted(x[1][0] for x in smtp.sent) == sorted(recipients.values())
+        assert len(calendar.written) == 1 and len(tasks.list_open("pilot")) == 1
+        assert not tasks.list_open("other")
+        with store._connection() as db:
+            assert db.execute("SELECT status FROM effects WHERE profile_id='other'").fetchone()[0] == "pending"
+
+        source = KnowledgeBase(store)
+        source.index("pilot", "known", "Четверг — дата отгрузки.")
+        source.index("other", "private", "Среда — дата отгрузки.")
+        model.answer = GroundedAnswer(answer="В четверг.", citations=[1])
+        worker.handle_update({
+            "message": {"text": "/ask дата отгрузки", "chat": {"type": "private", "id": 99}, "from": {"id": 99}},
+        })
+        assert len(model.calls) == 1
+        worker.handle_update({
+            "message": {"text": "/ask дата отгрузки", "chat": {"type": "private", "id": 42}, "from": {"id": 42}},
+        })
+        assert len(model.calls) == 2
+        assert "known" in bot.sent[-1]["text"]
+        assert "Среда" not in model.calls[-1][1][-1]["content"]

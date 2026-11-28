@@ -70,4 +70,3 @@ def test_two_requests_cannot_claim_the_same_sequence(setup):
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(send, ("r1", "r2")))
     assert sum(result != "conflict" for result in results) == 1
-

@@ -32,12 +32,15 @@ class TelegramAPI:
     def call(self, method: str, **payload: Any) -> Any:
         try:
             response = self._client.post(f"{self._base_url}/{method}", json=payload)
-            data = response.json()
-        except (httpx.RequestError, ValueError):
+        except httpx.RequestError:
             # Request exceptions contain the URL and therefore the bot token.
             raise TelegramError(None) from None
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
         if not isinstance(data, dict):
-            raise TelegramError(None)
+            raise TelegramError(None if response.is_success else response.status_code)
         if response.is_success and data.get("ok") is True and "result" in data:
             return data["result"]
         code = data.get("error_code", response.status_code)
@@ -49,10 +52,13 @@ class TelegramAPI:
         )
 
     def updates(self, offset: int | None = None) -> list[dict[str, Any]]:
-        return self.call(
+        result = self.call(
             "getUpdates", offset=offset, timeout=25,
             allowed_updates=["message", "callback_query"],
         )
+        if not isinstance(result, list):
+            raise TelegramError(None)
+        return result
 
 
 _BUTTONS = {
@@ -130,11 +136,16 @@ def render_card(card: ApprovalCardView) -> tuple[list[str], dict[str, Any]]:
 def deliver_pages(
     api: TelegramAPI, chat_id: int, pages: list[str], *, markup: dict[str, Any] | None = None,
 ) -> EffectResult:
+    if not pages:
+        return EffectResult(status=DeliveryStatus.FAILED, error_code="telegram_empty_message")
     sent_pages = 0
     try:
         for index, page in enumerate(pages):
             options = {"reply_markup": markup} if markup and index == len(pages) - 1 else {}
             message = api.call("sendMessage", chat_id=chat_id, text=page, **options)
+            message_id = message.get("message_id") if isinstance(message, dict) else None
+            if type(message_id) is not int or message_id <= 0:
+                raise TelegramError(None)
             sent_pages += 1
     except TelegramError as error:
         if sent_pages or error.code is None or error.code >= 500:
@@ -145,7 +156,7 @@ def deliver_pages(
                 retry_after_seconds=error.retry_after,
             )
         return EffectResult(status=DeliveryStatus.FAILED, error_code="telegram_rejected")
-    return EffectResult(status=DeliveryStatus.SENT, external_id=str(message["message_id"]))
+    return EffectResult(status=DeliveryStatus.SENT, external_id=str(message_id))
 
 
 class ApprovalNoticeTransport:

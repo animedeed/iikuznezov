@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import smtplib
 import ssl
+from hashlib import sha256
 from collections.abc import Callable
 from email.message import EmailMessage
 
-from app.mail.config import SmtpSettings
 from app.contracts import DeliveryStatus, Effect, EffectKind, EffectResult
 from app.core.store import Store
+from app.mail.config import SmtpSettings, valid_address
 
 SmtpFactory = Callable[..., smtplib.SMTP]
 
@@ -18,13 +19,33 @@ def _result(status: DeliveryStatus, code: str | None = None, external_id: str | 
     return EffectResult(status=status, error_code=code, external_id=external_id)
 
 
-def _valid_address(value: str) -> str | None:
-    """Accept only a bare single address; reject lists, display names and control characters."""
-    address = value.strip()
-    if not address or any(ch in address for ch in "\r\n\0 ,;<>()\"") or address.count("@") != 1:
-        return None
-    local, domain = address.split("@")
-    return address if local and "." in domain and not domain.endswith(".") else None
+def recipient_fingerprint(address: str) -> str:
+    """Pin a trusted recipient address without placing it in the effect payload."""
+    normalized = valid_address(address)
+    if normalized is None:
+        raise ValueError("Invalid SMTP recipient address")
+    return sha256(normalized.encode("ascii")).hexdigest()
+
+
+class _TrackedSMTP(smtplib.SMTP_SSL):
+    """Record whether the provider invited the client to start sending DATA."""
+
+    _inside_data = False
+    data_started = False
+
+    def data(self, msg):
+        self._inside_data = True
+        self.data_started = False
+        try:
+            return super().data(msg)
+        finally:
+            self._inside_data = False
+
+    def getreply(self):
+        code, response = super().getreply()
+        if self._inside_data and code == 354:
+            self.data_started = True
+        return code, response
 
 
 def _one_line(value: str, limit: int = 200) -> str:
@@ -56,16 +77,17 @@ class SmtpEmailTransport:
 
     def __init__(
         self, settings: SmtpSettings, *, store: Store | None = None,
-        smtp_factory: SmtpFactory = smtplib.SMTP_SSL,
+        smtp_factory: SmtpFactory = _TrackedSMTP, require_recipient_fingerprint: bool = False,
     ):
         self.settings = settings
         self.store = store
         self.smtp_factory = smtp_factory
+        self.require_recipient_fingerprint = require_recipient_fingerprint
 
     # -- message building ---------------------------------------------------
     def _recipient(self, effect: Effect) -> str | None:
         address = self.settings.recipients.get(effect.target_ref)
-        return _valid_address(address) if address else None
+        return valid_address(address) if address else None
 
     def build_message(self, effect: Effect, recipient: str) -> EmailMessage | EffectResult:
         payload = effect.payload
@@ -110,6 +132,11 @@ class SmtpEmailTransport:
         recipient = self._recipient(effect)
         if recipient is None:
             return _result(DeliveryStatus.FAILED, "unknown_recipient")
+        pin = effect.payload.get("recipient_fingerprint")
+        if pin is not None and pin != recipient_fingerprint(recipient):
+            return _result(DeliveryStatus.FAILED, "recipient_changed")
+        if pin is None and self.require_recipient_fingerprint:
+            return _result(DeliveryStatus.FAILED, "recipient_not_pinned")
         message = self.build_message(effect, recipient)
         if isinstance(message, EffectResult):
             return message
@@ -117,6 +144,9 @@ class SmtpEmailTransport:
 
     def send_message(self, message: EmailMessage) -> EffectResult:
         """Send a prepared message (used by the CLI connectivity check)."""
+        recipient = valid_address(str(message["To"]))
+        if recipient is None or message["From"] != self.settings.username:
+            return _result(DeliveryStatus.FAILED, "invalid_test_message")
         return self._deliver(message)
 
     def _deliver(self, message: EmailMessage) -> EffectResult:
@@ -132,6 +162,8 @@ class SmtpEmailTransport:
             connection.send_message(message, from_addr=self.settings.username, to_addrs=[message["To"]])
             return _result(DeliveryStatus.SENT, external_id=str(message["Message-ID"]).strip("<>")[:128])
         except Exception as error:  # noqa: BLE001 - every failure is mapped to a queue status
+            if phase == "send" and getattr(connection, "data_started", None) is False:
+                phase = "envelope"
             return self._classify(error, phase)
         finally:
             if connection is not None:
@@ -159,6 +191,10 @@ class SmtpEmailTransport:
         if isinstance(error, smtplib.SMTPResponseException):
             # Server answered explicitly: the message was not accepted.
             return by_code(error.smtp_code, "response")
+        if isinstance(error, smtplib.SMTPNotSupportedError):
+            return _result(DeliveryStatus.FAILED, "smtp_not_supported")
+        if phase == "envelope":
+            return _result(DeliveryStatus.RETRYABLE, "smtp_envelope_failed")
         if phase == "connect":
             return _result(DeliveryStatus.RETRYABLE, "smtp_connect_failed")
         # Disconnect or timeout once sending began: the server may have accepted the message.
@@ -171,7 +207,10 @@ def send_email(effect: Effect, *, settings: SmtpSettings | None = None, store: S
     Usable directly as an `EffectTransport.execute` callable wrapper; settings come from the
     environment unless given. Missing configuration is a permanent, safe `failed` (nothing was sent).
     """
-    active = settings if settings is not None else SmtpSettings.from_env()
+    try:
+        active = settings if settings is not None else SmtpSettings.from_env()
+    except ValueError:
+        return _result(DeliveryStatus.FAILED, "smtp_invalid_settings")
     if active is None:
         return _result(DeliveryStatus.FAILED, "smtp_not_configured")
     return SmtpEmailTransport(active, store=store).send_email(effect)

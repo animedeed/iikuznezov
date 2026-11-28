@@ -1,5 +1,7 @@
 """Process stored meeting transcripts using the workflow module."""
 
+from collections.abc import Mapping
+
 from app.adapters.model import ModelAdapterError
 from app.contracts import DocumentVersion
 from app.core.approvals import ApprovalService
@@ -21,14 +23,18 @@ def _saved_version(store: Store, profile_id: str, event_id: str) -> DocumentVers
 
 
 def process_saved_meeting(
-    store: Store, model: ModelPort, profile_id: str, event_id: str,
+    store: Store, model: ModelPort, profile_id: str, event_id: str, *,
+    recipient_fingerprints: Mapping[str, str] | None = None,
 ) -> DocumentVersion:
     """Persist a draft or recover the existing version on replay, including after approval."""
     saved = _saved_version(store, profile_id, event_id)
     if saved is not None:
         return saved
     try:
-        return process_meeting_event(store, ApprovalService(store), model, profile_id, event_id).document
+        return process_meeting_event(
+            store, ApprovalService(store), model, profile_id, event_id,
+            recipient_fingerprints=recipient_fingerprints,
+        ).document
     except ValueError as error:
         # A concurrent operator may have closed the first approval while the model was running.
         if str(error) == "Current approval is closed":
@@ -38,7 +44,10 @@ def process_saved_meeting(
         raise
 
 
-def process_pending_meetings(store: Store, model: ModelPort, *, profile_id: str) -> dict:
+def process_pending_meetings(
+    store: Store, model: ModelPort, *, profile_id: str,
+    recipient_fingerprints: Mapping[str, str] | None = None,
+) -> dict:
     """Run one controlled batch. Failed events stay available for the next run."""
     if store.get_profile(profile_id) is None:
         raise LookupError("Unknown profile")
@@ -54,7 +63,9 @@ def process_pending_meetings(store: Store, model: ModelPort, *, profile_id: str)
     for row in rows:
         event_id = row["event_id"]
         try:
-            version = process_saved_meeting(store, model, profile_id, event_id)
+            version = process_saved_meeting(
+                store, model, profile_id, event_id, recipient_fingerprints=recipient_fingerprints,
+            )
         except ModelAdapterError as error:
             errors.append({"event_id": event_id, "error_code": error.code})
         except ValueError:
@@ -62,4 +73,3 @@ def process_pending_meetings(store: Store, model: ModelPort, *, profile_id: str)
         else:
             processed.append({"event_id": event_id, "document_id": version.document_id, "version": version.version})
     return {"processed": processed, "errors": errors}
-

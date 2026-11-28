@@ -94,7 +94,9 @@ class EffectQueue:
                 (stamp, now),
             )
 
-    def run_once(self, transport: EffectTransport, *, lease_seconds: int = 60) -> str | None:
+    def run_once(
+        self, transport: EffectTransport, *, lease_seconds: int = 60, profile_id: str | None = None,
+    ) -> str | None:
         """Claim and process one effect. Ambiguous transport exceptions become unknown."""
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
@@ -121,8 +123,9 @@ class EffectQueue:
             )
             row = db.execute(
                 """SELECT * FROM effects WHERE status IN ('pending', 'retryable')
-                AND next_attempt_at <= ? ORDER BY created_at, effect_id LIMIT 1""",
-                (now_epoch,),
+                AND next_attempt_at <= ? AND (? IS NULL OR profile_id = ?)
+                ORDER BY created_at, effect_id LIMIT 1""",
+                (now_epoch, profile_id, profile_id),
             ).fetchone()
             if row is None:
                 return None

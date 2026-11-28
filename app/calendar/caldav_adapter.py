@@ -8,8 +8,10 @@ Credentials are passed in by the caller (read them from environment variables th
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
+from app.calendar.ics import read_occurrence, within_window
 from app.calendar.ports import (
     CalendarConflictError,
     CalendarEvent,
@@ -18,39 +20,41 @@ from app.calendar.ports import (
 )
 
 
-def _escape(value: str) -> str:
-    return (value.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
-            .replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n"))
-
-
-def _utc(value: datetime) -> str:
-    return value.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+def _normalize_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def render_ics(event: EventSpec, *, stamp: datetime | None = None) -> str:
     """Minimal RFC 5545 VEVENT. Deterministic apart from DTSTAMP."""
-    lines = [
-        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//iikuznezov//workflow//RU",
-        "BEGIN:VEVENT", f"UID:{event.uid}", f"DTSTAMP:{_utc(stamp or datetime.now(UTC))}",
-        f"SUMMARY:{_escape(event.summary)}",
-    ]
+    from icalendar import Calendar, Event
+
+    calendar = Calendar()
+    calendar.add("VERSION", "2.0")
+    calendar.add("PRODID", "-//iikuznezov//workflow//RU")
+    component = Event()
+    component.add("UID", event.uid)
+    component.add("DTSTAMP", (stamp or datetime.now(UTC)).astimezone(UTC))
+    component.add("SUMMARY", _normalize_newlines(event.summary))
     if event.start_date is not None:
-        lines += [f"DTSTART;VALUE=DATE:{event.start_date:%Y%m%d}",
-                  f"DTEND;VALUE=DATE:{event.start_date + timedelta(days=1):%Y%m%d}"]
+        component.add("DTSTART", event.start_date)
+        component.add("DTEND", event.start_date + timedelta(days=1))
     else:
-        lines += [f"DTSTART:{_utc(event.starts_at)}", f"DTEND:{_utc(event.ends_at)}"]
+        component.add("DTSTART", event.starts_at)
+        component.add("DTEND", event.ends_at)
     if event.description:
-        lines.append(f"DESCRIPTION:{_escape(event.description)}")
-    lines += ["END:VEVENT", "END:VCALENDAR"]
-    return "\r\n".join(lines) + "\r\n"
+        component.add("DESCRIPTION", _normalize_newlines(event.description))
+    calendar.add_component(component)
+    return calendar.to_ical().decode("utf-8")
 
 
 class CalDavCalendar:
     def __init__(self, *, url: str, username: str, password: str,
-                 calendars: Mapping[str, str], timeout: int = 10):
-        """`calendars` maps profile_id -> calendar display name."""
+                 calendars: Mapping[str, str], timeout: int = 10,
+                 timezones: Mapping[str, str] | None = None):
+        """`calendars` maps profile IDs to display names, `timezones` to IANA names."""
         self._conn = (url, username, password, timeout)
         self._names = dict(calendars)
+        self._zones = {profile_id: ZoneInfo(zone) for profile_id, zone in (timezones or {}).items()}
         self._cache: dict[str, object] = {}
 
     def _calendar(self, profile_id: str):
@@ -70,25 +74,14 @@ class CalDavCalendar:
 
     def list_events(self, profile_id: str, start: datetime, end: datetime) -> Sequence[CalendarEvent]:
         calendar = self._calendar(profile_id)
-        found = calendar.search(start=start, end=end, event=True, expand=True)
+        zone = self._zones.get(profile_id, ZoneInfo("UTC"))
+        found = calendar.search(start=start.astimezone(zone), end=end.astimezone(zone), event=True, expand=True)
         events: list[CalendarEvent] = []
         for item in found:
             for part in item.icalendar_instance.walk("VEVENT"):
-                begin = part.get("DTSTART").dt
-                finish = part.get("DTEND").dt if part.get("DTEND") is not None else None
-                all_day = isinstance(begin, date) and not isinstance(begin, datetime)
-                if all_day:
-                    begin = datetime.combine(begin, time.min, tzinfo=UTC)
-                    if isinstance(finish, date) and not isinstance(finish, datetime):
-                        finish = datetime.combine(finish, time.min, tzinfo=UTC)
-                elif begin.tzinfo is None:
-                    begin = begin.replace(tzinfo=UTC)
-                if isinstance(finish, datetime) and finish.tzinfo is None:
-                    finish = finish.replace(tzinfo=UTC)
-                events.append(CalendarEvent(
-                    id=str(part.get("UID")), uid=str(part.get("UID")), origin="caldav", title=str(part.get("SUMMARY") or "Без названия")[:500],
-                    starts_at=begin, ends_at=finish, all_day=all_day,
-                ))
+                event = read_occurrence(part, zone, origin="caldav")
+                if event is not None and within_window(event, start, end):
+                    events.append(event)
         return events
 
     def upsert_event(self, profile_id: str, event: EventSpec) -> str:
@@ -113,10 +106,17 @@ class CalDavCalendar:
 
     @staticmethod
     def _same(existing, event: EventSpec) -> bool:
-        part = next(iter(existing.icalendar_instance.walk("VEVENT")), None)
-        if part is None or str(part.get("UID")) != event.uid or str(part.get("SUMMARY")) != event.summary:
+        parts = existing.icalendar_instance.walk("VEVENT")
+        if len(parts) != 1:
             return False
-        if str(part.get("DESCRIPTION") or "") != event.description:
+        part = parts[0]
+        if any(part.get(key) is not None for key in ("RRULE", "RDATE", "RECURRENCE-ID", "ATTENDEE")):
+            return False
+        if str(part.get("STATUS", "")).upper() == "CANCELLED":
+            return False
+        if str(part.get("UID")) != event.uid or str(part.get("SUMMARY")) != _normalize_newlines(event.summary):
+            return False
+        if str(part.get("DESCRIPTION") or "") != _normalize_newlines(event.description):
             return False
         begin = part.decoded("DTSTART", None)
         end = part.decoded("DTEND", None)

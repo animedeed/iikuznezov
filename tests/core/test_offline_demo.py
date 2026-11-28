@@ -99,4 +99,3 @@ def test_avatar_http_routes_use_the_shared_database(tmp_path):
             assert [row["event_id"] for row in result["processed"]] == [event_id]
 
     run_async(scenario())
-

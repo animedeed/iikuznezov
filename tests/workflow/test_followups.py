@@ -65,6 +65,13 @@ def test_sweep_skips_unapproved_and_is_repeatable(store, opened, approve):
     assert len([e for e in effects(store) if e[0] == "calendar_event"]) == 1
 
 
+def test_sweep_can_be_scoped_to_one_profile(store, opened, approve):
+    _, _, card = opened
+    approve(card)
+    assert sweep_approved_minutes(store, profile_id="p2") == 0
+    assert sweep_approved_minutes(store, profile_id="p1") == 1
+
+
 def test_wrong_profile_cannot_read_meeting(store, opened):
     event_id, _, _ = opened
     with pytest.raises(LookupError):

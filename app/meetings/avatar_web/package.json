@@ -1,0 +1,8 @@
+{
+  "name": "iikuznezov-meeting-avatar",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "three": "0.180.0"
+  }
+}

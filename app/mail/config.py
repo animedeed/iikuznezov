@@ -1,8 +1,33 @@
 """Mail settings. Read from the process environment; kept here so shared config files stay untouched."""
 
+import math
+import re
 from dataclasses import dataclass, field
+from email.errors import HeaderParseError
+from email.headerregistry import Address
 from json import JSONDecodeError, loads
 from os import environ
+
+
+def valid_address(value: str) -> str | None:
+    """Accept precisely one ordinary ASCII mailbox address."""
+    if not isinstance(value, str) or not value.isascii():
+        return None
+    address = value.strip(" ")
+    if not address or any(ord(char) <= 32 or ord(char) == 127 for char in address):
+        return None
+    try:
+        parsed = Address(addr_spec=address)
+    except (HeaderParseError, ValueError, IndexError):
+        return None
+    labels = parsed.domain.split(".")
+    if (
+        parsed.addr_spec != address or not parsed.username or len(parsed.username) > 64
+        or len(address) > 254 or len(labels) < 2
+        or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label, re.I) for label in labels)
+    ):
+        return None
+    return address
 
 
 @dataclass(frozen=True)
@@ -17,10 +42,12 @@ class SmtpSettings:
     recipients: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if "@" not in self.username or not self.password:
+        if valid_address(self.username) != self.username or not self.password:
             raise ValueError("Set YANDEX_MAIL_ADDRESS (full address) and YANDEX_MAIL_APP_PASSWORD together")
-        if self.timeout_seconds <= 0:
-            raise ValueError("SMTP timeout must be positive")
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("SMTP timeout must be finite and positive")
+        if not self.host.strip() or not 0 < self.port <= 65535:
+            raise ValueError("Set a valid SMTP host and port")
 
     @classmethod
     def from_env(cls) -> "SmtpSettings | None":

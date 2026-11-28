@@ -67,6 +67,7 @@ class EffectIntent(Contract):
 
     kind: EffectKind
     target_ref: Ref
+    recipient_fingerprint: str | None = None
 
 
 def _now() -> str:
@@ -395,6 +396,8 @@ class ApprovalService:
                 payload = {"task": task.model_dump(mode="json")}
             else:
                 raise ValueError("Unexpected protocol delivery")
+            if intent.kind == EffectKind.EMAIL and intent.recipient_fingerprint is not None:
+                payload["recipient_fingerprint"] = intent.recipient_fingerprint
             effects.append(Effect(
                 effect_id=uuid4().hex, profile_id=version.profile_id, document_id=version.document_id,
                 version=version.version, kind=intent.kind, target_ref=intent.target_ref, payload=payload,

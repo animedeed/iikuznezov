@@ -17,8 +17,8 @@ from app.contracts import (
 from app.core.approvals import ApprovalService, EffectIntent
 from app.core.effects import EffectQueue
 from app.core.store import Store
-from app.mail.config import SmtpSettings
-from app.mail.smtp import SmtpEmailTransport, SmtpFactory, _valid_address
+from app.mail.config import SmtpSettings, valid_address
+from app.mail.smtp import SmtpEmailTransport, SmtpFactory
 from app.telegram.bot import TelegramAPI, TelegramError
 from app.telegram.channel import TelegramChannel
 from app.telegram.demo_plans import build_demo_plan
@@ -33,7 +33,7 @@ class M001Run:
         user_id: int, chat_id: int, recipient: str, smtp_settings: SmtpSettings,
         fixture_path: Path = _FIXTURE_PATH, smtp_factory: SmtpFactory | None = None,
     ):
-        address = _valid_address(recipient)
+        address = valid_address(recipient)
         if address is None:
             raise ValueError("Configure exactly one valid test recipient")
         if user_id <= 0 or chat_id == 0 or bot_id <= 0:
@@ -44,7 +44,7 @@ class M001Run:
         self.chat_id = chat_id
         self.actor = TelegramActor(telegram_user_id=user_id)
         self.recipient_ref = "m001-test-" + sha256(address.encode()).hexdigest()
-        sender = _valid_address(smtp_settings.username)
+        sender = valid_address(smtp_settings.username)
         if sender is None:
             raise ValueError("Configure a valid SMTP sender")
         self._bind_run(sha256(sender.encode()).hexdigest())
@@ -211,7 +211,7 @@ def main() -> None:
     args = parser.parse_args()
     token = environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     recipient = environ.get("IIKUZNEZOV_TEST_RECIPIENT", "").strip()
-    if not token or _valid_address(recipient) is None:
+    if not token or valid_address(recipient) is None:
         parser.error("Configure TELEGRAM_BOT_TOKEN and exactly one IIKUZNEZOV_TEST_RECIPIENT")
     if args.user_id <= 0 or args.chat_id == 0:
         parser.error("Use a positive user ID and a nonzero chat ID")
