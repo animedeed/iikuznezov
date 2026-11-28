@@ -83,8 +83,9 @@ def deadline_events(profile_id: str, document_id: str, version: int,
                     candidate: MinutesCandidate, allowed_assignees: Sequence[str]) -> tuple[EventSpec, ...]:
     """One all-day event on each complete task's due date."""
     events = []
+    allowed = set(allowed_assignees)
     for task in candidate.tasks:
-        if task.status != "draft" or task.due_date is None or task.assignee_ref not in set(allowed_assignees):
+        if task.status != "draft" or task.due_date is None or task.assignee_ref not in allowed:
             continue
         uid = uuid5(NAMESPACE_URL, f"{profile_id}:{document_id}:{version}:{task.task_ref}").hex
         events.append(EventSpec(
@@ -102,11 +103,13 @@ def schedule_calendar_events(
     effect_ids: list[str] = []
     with store._connection(write=True) as db:
         approval = db.execute(
-            "SELECT state FROM approvals WHERE profile_id = ? AND document_id = ? AND version = ?",
+            """SELECT 1 FROM approvals AS a JOIN documents AS d USING (profile_id, document_id)
+            WHERE a.profile_id = ? AND a.document_id = ? AND a.version = ?
+              AND a.state = 'approved' AND d.kind = 'minutes'""",
             (profile_id, document_id, version),
         ).fetchone()
-        if approval is None or approval["state"] != "approved":
-            raise ApprovalRequired("Version is not approved")
+        if approval is None:
+            raise ApprovalRequired("An approved minutes version is required")
         for spec in specs:
             key = dumps([document_id, version, EffectKind.CALENDAR_EVENT.value, spec.uid],
                         separators=(",", ":"), ensure_ascii=False)
@@ -120,18 +123,22 @@ def schedule_calendar_events(
     return tuple(effect_ids)
 
 
-def sweep_approved_minutes(store: Store, *, deadline_events_enabled: bool = True) -> int:
+def sweep_approved_minutes(
+    store: Store, *, deadline_events_enabled: bool = True, profile_id: str | None = None,
+) -> int:
     """Queue deadline events for every approved minutes version. Idempotent; call it from the
     executor loop before EffectQueue.run_once. Returns how many events were considered."""
+    if not deadline_events_enabled:
+        return 0
     with store._connection() as db:
         rows = db.execute(
             """SELECT a.profile_id, a.document_id, a.version, d.source_event_id
             FROM approvals AS a JOIN documents AS d
               ON d.profile_id = a.profile_id AND d.document_id = a.document_id
-            WHERE a.state = 'approved' AND d.kind = 'minutes' ORDER BY a.decided_at"""
+            WHERE a.state = 'approved' AND d.kind = 'minutes'
+              AND (? IS NULL OR a.profile_id = ?) ORDER BY a.decided_at""",
+            (profile_id, profile_id),
         ).fetchall()
-    if not deadline_events_enabled:
-        return 0
     total = 0
     for row in rows:
         version = store.get_version(row["profile_id"], row["document_id"], row["version"])
@@ -140,6 +147,10 @@ def sweep_approved_minutes(store: Store, *, deadline_events_enabled: bool = True
         source, _ = load_meeting_source(store, row["profile_id"], row["source_event_id"])
         specs = deadline_events(row["profile_id"], row["document_id"], row["version"],
                                 version.candidate, source.allowed_assignee_refs)
-        schedule_calendar_events(store, row["profile_id"], row["document_id"], row["version"], specs)
+        try:
+            schedule_calendar_events(store, row["profile_id"], row["document_id"], row["version"], specs)
+        except ApprovalRequired:
+            # A concurrent revision can supersede the approved version after the read above.
+            continue
         total += len(specs)
     return total

@@ -30,12 +30,13 @@ def list_calendars() -> None:
         print("Календарь:", calendar.name)
 
 
-def check(name: str) -> None:
+def check(name: str) -> bool:
     from app.calendar.caldav_adapter import CalDavCalendar
     from app.calendar.ports import EventSpec
 
     email, key = creds()
-    calendar = CalDavCalendar(url=URL, username=email, password=key, calendars={"check": name}, timeout=15)
+    calendar = CalDavCalendar(url=URL, username=email, password=key, calendars={"check": name}, timeout=15,
+                             timezones={"check": "Europe/Moscow"})
     tomorrow = (datetime.now(ZoneInfo("Europe/Moscow")) + timedelta(days=1)).date()
     start = datetime.combine(tomorrow, time(12, 0), tzinfo=ZoneInfo("Europe/Moscow")).astimezone(UTC)
     spec = EventSpec(uid=f"check-{tomorrow:%Y%m%d}@iikuznezov", summary="ИИкузница: контрольное событие",
@@ -58,9 +59,13 @@ def check(name: str) -> None:
     print("\nИТОГ:", "всё работает" if ok else "что-то не так, пришлите вывод разработчику")
     print(f"Откройте Яндекс Календарь: завтра ({tomorrow:%d.%m}) в 12:00 по Москве должно быть событие.")
     print("Потом удалите его вручную.")
+    return ok
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(__doc__)
-    list_calendars() if sys.argv[1] == "--list" else check(sys.argv[1])
+    if sys.argv[1] == "--list":
+        list_calendars()
+    else:
+        sys.exit(0 if check(sys.argv[1]) else 1)

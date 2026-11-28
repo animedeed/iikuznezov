@@ -1,4 +1,4 @@
-"""Busy checks. All-day and recurring events count; events this service wrote do not."""
+"""Busy checks for timed and all-day calendar occurrences."""
 
 from __future__ import annotations
 
@@ -23,8 +23,9 @@ def blocking_events(
 ) -> list[CalendarEvent]:
     return [
         e for e in events
-        if overlaps(e.starts_at, _end(e), start, end)
-        and (e.uid or e.id) != ignore_uid and not (e.uid or e.id).endswith(OWN_UID_SUFFIX)
+        if e.busy and overlaps(e.starts_at, _end(e), start, end)
+        and (e.uid or e.id) != ignore_uid
+        and not (e.all_day and (e.uid or e.id).endswith(OWN_UID_SUFFIX))
     ]
 
 

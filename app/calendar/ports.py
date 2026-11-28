@@ -47,6 +47,7 @@ class CalendarEvent(Contract):
     starts_at: UtcMoment
     ends_at: UtcMoment | None = None
     all_day: bool = False
+    busy: bool = True
 
 
 class EventSpec(Contract):
@@ -76,5 +77,5 @@ class CalendarPort(Protocol):
         ...
 
     def upsert_event(self, profile_id: str, event: EventSpec) -> str:
-        """Create or replace the event with this UID. Must be idempotent. Returns the external id."""
+        """Create the event or return the ID of an identical existing event."""
         ...
