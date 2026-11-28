@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3D-аватар для Телемоста</title>
+  <link rel="stylesheet" href="/avatar.css">
+  <script type="importmap">{"imports":{"three":"/three.module.js"}}</script>
+  <script type="module" src="/avatar.js"></script>
+</head>
+<body>
+  <main class="layout">
+    <section class="stage" aria-label="3D-аватар">
+      <canvas id="portrait" aria-label="Анимированный объёмный персонаж"></canvas>
+      <p id="loading" class="render-error" role="status" hidden>Загружается 3D-модель…</p>
+      <p id="render-error" class="render-error" hidden>Для 3D-сцены нужен браузер с WebGL 2.</p>
+    </section>
+    <aside class="controls" id="controls" hidden>
+      <div class="heading">
+        <span class="eyebrow">ИИ-помощник</span>
+        <h1>Мимика в разговоре</h1>
+      </div>
+      <fieldset class="characters">
+        <legend>Образ</legend>
+        <div class="character-options">
+          <button type="button" data-character="female">София</button>
+          <button type="button" data-character="male">Даниэль</button>
+        </div>
+      </fieldset>
+      <div class="status"><i></i><output id="status" aria-live="polite">Ожидает</output></div>
+      <div class="actions" aria-label="Демонстрация реакций">
+        <button type="button" data-phase="listening" data-emotion="neutral">Слушает</button>
+        <button type="button" data-phase="thinking" data-emotion="neutral">Думает</button>
+        <button type="button" data-phase="speaking" data-emotion="joy">Радость</button>
+        <button type="button" data-phase="speaking" data-emotion="surprise">Удивление</button>
+        <button type="button" data-phase="speaking" data-emotion="concern">Озабоченность</button>
+        <button type="button" data-phase="idle" data-emotion="neutral">Покой</button>
+      </div>
+      <a href="/" target="_blank" rel="noopener">Открыть чистый кадр ↗</a>
+    </aside>
+  </main>
+</body>
+</html>

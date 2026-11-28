@@ -16,11 +16,13 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest==9.2.0"]
+calendar = ["caldav==3.7.0", "icalendar==7.3.2", "recurring-ical-events==3.8.2"]
 
 [tool.setuptools.packages.find]
 include = ["app*", "migrations"]
 
 [tool.setuptools.package-data]
+"app.meetings" = ["avatar_web/*.html", "avatar_web/*.css", "avatar_web/*.js", "avatar_web/*.json", "avatar_web/models/*.glb", "avatar_web/models/*.md"]
 migrations = ["*.sql"]
 
 [tool.pytest.ini_options]
