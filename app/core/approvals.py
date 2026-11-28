@@ -114,9 +114,28 @@ class ApprovalService:
     def propose(
         self, profile_id: str, source_id: str, candidate: Candidate, *,
         mail_dispatch: MailDispatch | None = None, intents: Sequence[EffectIntent] = (),
+        mail_channel_id: str | None = None,
     ) -> ApprovalCardView:
         """Open or read the current approval for a recorded source."""
         with self.store._connection(write=True) as db:
+            if mail_channel_id is not None:
+                active = db.execute(
+                    """SELECT 1 FROM bindings AS b JOIN inbox_events AS e ON b.profile_id=e.profile_id
+                       WHERE b.kind='mail' AND b.active=1 AND b.profile_id=? AND b.channel_id=?
+                         AND e.event_id=? AND e.source='mail'
+                         AND json_extract(e.external_key, '$[0]')=b.channel_id""",
+                    (profile_id, mail_channel_id, source_id),
+                ).fetchone()
+                if active is None:
+                    raise PermissionError("Mail channel binding changed during intake")
+            if isinstance(candidate, MailCandidate):
+                automatic = db.execute(
+                    """SELECT 1 FROM inbox_events WHERE profile_id=? AND event_id=?
+                       AND source='mail' AND status='mail_auto_forward_queued'""",
+                    (profile_id, source_id),
+                ).fetchone()
+                if automatic is not None:
+                    raise ValueError("Mail source already has an automatic delivery queued")
             first = self.store._record_draft(db, profile_id, source_id, candidate, mail_dispatch)
             current = self.store._get_version(db, profile_id, first.document_id)
             if current is None:
