@@ -10,7 +10,7 @@ from pydantic import TypeAdapter
 
 from app.contracts import Candidate, DocumentVersion, MailDispatch, MailReceipt, Profile, ReceiptResult
 
-_MIGRATIONS = ("001_initial.sql", "002_approvals.sql", "003_effects.sql")
+_MIGRATIONS = ("001_initial.sql", "002_approvals.sql", "003_effects.sql", "004_knowledge.sql")
 _candidate_adapter = TypeAdapter(Candidate)
 
 
