@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,24 +14,45 @@ from app.contracts import MailReceipt, PolicyClass, Profile, Route
 from app.mail.routing import MailRoutingContext, classify_mail, route_mail
 
 
+_EXPECTED_ACTIONS = {
+    "спросить_руководителя": {Route.REVIEW},
+    "в_сводку": {Route.RECORD_STATUS},
+    "делегировать": {Route.FORWARD_SALES, Route.FORWARD_SERVICE},
+    "игнорировать": {Route.IGNORE},
+    "авто": {Route.CHECK_CALENDAR},
+}
+_SENSITIVE_CATEGORIES = {"деньги", "кадры", "обязательства_клиентам", "руководство"}
+
+
 def evaluate(rows: Iterable[dict[str, str]], context: MailRoutingContext) -> dict[str, object]:
     results = []
     for number, row in enumerate(rows, 1):
         mail = MailReceipt.model_validate({
-            "folder": "INBOX", "uidvalidity": 1, "uid": number, "from": row.get("from") or "unknown@example.invalid",
-            "subject": row.get("subject", ""), "text": row["text"], "received_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "folder": "INBOX",
+            "uidvalidity": 1,
+            "uid": number,
+            "from": row.get("from") or row.get("from_email") or "unknown@example.invalid",
+            "subject": row.get("subject", ""),
+            "text": row["text"] if "text" in row else row["body"],
+            "received_at": datetime(2026, 1, 1, tzinfo=UTC),
         })
-        actual = route_mail(classify_mail(mail, context), context).route
-        expected = Route(row.get("expected_action") or row["expected_route"])
+        row_context = _benchmark_context(context, row.get("sender_role", ""))
+        actual = route_mail(classify_mail(mail, row_context), row_context).route
+
+        label = row.get("expected_action") or row["expected_route"]
+        expected = _EXPECTED_ACTIONS.get(label)
+        if expected is None:
+            expected = {Route(label)}
         sensitivity = row.get("expected_policy_class", "").strip()
         if sensitivity:
             PolicyClass(sensitivity)
+        is_sensitive = bool(sensitivity) or row.get("category") in _SENSITIVE_CATEGORIES
         error = None
-        if (sensitivity or expected == Route.REVIEW) and actual != Route.REVIEW:
-            error = "unsafe_automation" if sensitivity else "missed_review"
-        elif actual != expected:
+        if (is_sensitive or expected == {Route.REVIEW}) and actual != Route.REVIEW:
+            error = "unsafe_automation" if is_sensitive else "missed_review"
+        elif actual not in expected:
             error = "no_decision" if actual == Route.REVIEW else "wrong_route"
-        results.append({"id": row["id"], "predicted_route": actual, "expected_route": expected, "error": error})
+        results.append({"id": row["id"], "predicted_route": actual, "expected_action": label, "error": error})
     unresolved = sum(item["error"] == "no_decision" for item in results)
     return {
         "count": len(results),
@@ -41,6 +63,16 @@ def evaluate(rows: Iterable[dict[str, str]], context: MailRoutingContext) -> dic
     }
 
 
+def _benchmark_context(context: MailRoutingContext, sender_role: str) -> MailRoutingContext:
+    # The benchmark provides the role alongside the email. Runtime callers resolve it
+    # from trusted configuration and can keep the same route contract.
+    if sender_role == "руководитель руководителя":
+        return replace(context, sender_policy=PolicyClass.EXECUTIVE_MAIL)
+    if sender_role in {"подчинённый", "коллега"}:
+        return replace(context, routes={**context.routes, "meeting": Route.CHECK_CALENDAR})
+    return context
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate mail routes without reading or sending mail")
     parser.add_argument("--input", type=Path, required=True)
@@ -48,6 +80,7 @@ def main() -> int:
     args = parser.parse_args()
     context = MailRoutingContext(
         profile=Profile(profile_id="evaluation", timezone="UTC", quote_route=args.quote_route),
+        routes={"access": Route.FORWARD_SERVICE},
         targets={Route.FORWARD_SALES: "sales-desk", Route.FORWARD_SERVICE: "service-desk"},
     )
     with args.input.open(encoding="utf-8-sig", newline="") as source:

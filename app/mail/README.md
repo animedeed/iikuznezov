@@ -12,7 +12,7 @@
 
 `classify_mail(mail, context, model=...)` принимает нормализованное письмо и настройки профиля. `route_mail(candidate, context)` применяет профильные маршруты, разрешённых получателей и флаги автоматизации. Календарный маршрут требует явного правила и передаётся на проверку доступности в общем сценарии. Чувствительные и неоднозначные письма требуют согласования. `sender_policy` должен поступать из доверенной настройки, поскольку заголовок From сам по себе не подтверждает полномочия.
 
-`python -m app.mail.evaluate --input private.csv` печатает JSON-отчёт без подключения к почте и модели. CSV содержит `id`, `text`, `expected_action` или `expected_route`. Дополнительно поддерживаются `subject`, `from` и `expected_policy_class`. Для проверки профиля, где КП уходит на согласование, добавьте `--quote-route review`.
+`python -m app.mail.evaluate --input private.csv` печатает JSON-отчёт без подключения к почте и модели. CSV содержит `id`, `text`, `expected_action` или `expected_route`. Дополнительно поддерживаются `subject`, `from` и `expected_policy_class`. Команда также принимает исходный `inbox.csv` хакатона с `body`, `from_email`, `sender_role` и русскими значениями `expected_action`. Результат `check_calendar` в отчёте означает передачу письма на проверку календаря. Для проверки профиля, где КП уходит на согласование, добавьте `--quote-route review`.
 
 ## Отправка через SMTP
 

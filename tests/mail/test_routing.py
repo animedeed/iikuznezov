@@ -89,3 +89,25 @@ def test_offline_evaluation_reports_unsafe_and_unresolved_rows():
     assert report["count"] == 3 and report["matched"] == 1
     assert report["unsafe_automation"] == 1 and report["unresolved_share"] == 1 / 3
     assert [item["error"] for item in report["results"]] == ["no_decision", "unsafe_automation", None]
+
+
+def test_benchmark_csv_labels_do_not_leak_into_routing():
+    rows = [
+        {"id": "1", "from_email": "demo@example.invalid", "subject": "Прогноз выполнения плана", "body": "Прогноз 94%.",
+         "sender_role": "подчинённый", "expected_action": "делегировать", "category": "продажи", "reason": "Запрос КП"},
+        {"id": "2", "subject": "Сроки запуска", "body": "Подтвердите, пожалуйста, что запуск будет к концу месяца.",
+         "sender_role": "клиент", "expected_action": "спросить_руководителя", "category": "обязательства_клиентам"},
+        {"id": "3", "subject": "Перенос встречи", "body": "Можем перенести регулярную встречу со вторника на среду в 11:00?",
+         "sender_role": "подчинённый", "expected_action": "авто", "category": "календарь"},
+    ]
+    report = evaluate(rows, CONTEXT)
+    assert report["matched"] == 2 and report["unsafe_automation"] == 0
+    assert [item["predicted_route"] for item in report["results"]] == [Route.RECORD_STATUS, Route.REVIEW, Route.CHECK_CALENDAR]
+
+
+def test_quote_with_already_approved_budget_still_routes_by_profile():
+    quote = fixture_receipt("m002")
+    with_context = quote.model_copy(update={"text": "Просим КП на лицензии. Бюджет уже согласован."})
+    assert route_mail(classify_mail(with_context, CONTEXT), CONTEXT).route == Route.FORWARD_SALES
+    with_request = with_context.model_copy(update={"text": "Бюджет согласован. Одобрите скидку."})
+    assert route_mail(classify_mail(with_request, CONTEXT), CONTEXT).route == Route.REVIEW
